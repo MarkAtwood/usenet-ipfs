@@ -86,6 +86,13 @@ pub struct SessionContext {
     /// not already TLS-protected.  Advertised in CAPABILITIES on plain
     /// connections.  Always `false` on NNTPS connections.
     pub starttls_available: bool,
+    /// Whether the full-text search index is available.
+    ///
+    /// Set to `true` when `ServerStores::search_index` is `Some`.  Only when
+    /// this is `true` is SEARCH advertised in CAPABILITIES.  RFC 3977 §5.2
+    /// requires that capabilities advertised must be usable in the current
+    /// state — advertising SEARCH when the index is absent misleads clients.
+    pub search_available: bool,
 }
 
 /// Maximum consecutive AUTHINFO PASS failures before the connection is dropped.
@@ -128,6 +135,7 @@ impl SessionContext {
             auth_failure_count: 0,
             is_drain_session: false,
             starttls_available: false,
+            search_available: false,
         }
     }
 }

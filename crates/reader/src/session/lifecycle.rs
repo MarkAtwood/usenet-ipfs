@@ -172,6 +172,7 @@ async fn run_plain_session(
         },
     );
     ctx.starttls_available = tls_acceptor.is_some();
+    ctx.search_available = stores.search_index.is_some();
     load_known_groups(&stores, &mut ctx).await;
 
     let (read_half, mut write_half) = stream.into_split();
@@ -275,6 +276,7 @@ async fn run_session_post_starttls<S>(
         },
     );
     ctx.starttls_available = false; // already TLS; no further upgrade
+    ctx.search_available = stores.search_index.is_some();
     ctx.client_cert_fingerprint = client_cert_fingerprint;
     ctx.client_cert_der = client_cert_der;
     load_known_groups(&stores, &mut ctx).await;
@@ -657,8 +659,8 @@ where
                 send!(resp);
                 continue;
             }
-            Command::List(ListSubcommand::Active) => {
-                let resp = handle_list_active_live(stores, ctx).await;
+            Command::List(ListSubcommand::Active(ref wildmat)) => {
+                let resp = handle_list_active_live(stores, wildmat.as_deref()).await;
                 send!(resp);
                 continue;
             }
@@ -1077,6 +1079,7 @@ async fn run_session_io<S>(
             tls_active: is_tls,
         },
     );
+    ctx.search_available = stores.search_index.is_some();
     ctx.client_cert_fingerprint = client_cert_fingerprint;
     ctx.client_cert_der = client_cert_der;
     load_known_groups(&stores, &mut ctx).await;
@@ -1950,8 +1953,10 @@ async fn handle_last_live(stores: &ServerStores, ctx: &mut SessionContext) -> Re
     }
 }
 
-/// LIST ACTIVE: return live article ranges for all groups that have articles.
-async fn handle_list_active_live(stores: &ServerStores, _ctx: &SessionContext) -> Response {
+/// LIST ACTIVE [wildmat]: return live article ranges for groups that have articles.
+///
+/// If `wildmat` is `Some`, only groups whose names match the pattern are included.
+async fn handle_list_active_live(stores: &ServerStores, wildmat: Option<&str>) -> Response {
     let groups = match stores.article_numbers.list_groups().await {
         Ok(g) => g,
         Err(e) => {
@@ -1961,6 +1966,11 @@ async fn handle_list_active_live(stores: &ServerStores, _ctx: &SessionContext) -
     };
     let body: Vec<String> = groups
         .into_iter()
+        .filter(|(name, _, _)| {
+            wildmat
+                .map(|pat| stoa_core::wildmat::matches_wildmat(name, pat))
+                .unwrap_or(true)
+        })
         .map(|(name, low, high)| format!("{} {} {} y", name, high, low))
         .collect();
     Response::list_active(body)

@@ -68,6 +68,7 @@ impl Response {
         auth_required: bool,
         starttls_available: bool,
         sasl_oauthbearer: bool,
+        search_available: bool,
     ) -> Self {
         let mut caps = vec![
             "VERSION 2".to_string(),
@@ -75,7 +76,6 @@ impl Response {
             "OVER".to_string(),
             "HDR".to_string(),
             "LIST ACTIVE NEWSGROUPS".to_string(),
-            "SEARCH".to_string(),
             // CID extension capabilities (ADR-0007)
             "XCID".to_string(),
             "XVERIFY".to_string(),
@@ -84,6 +84,9 @@ impl Response {
             // DID signature verification header extension
             "X-USENET-IPFS-DID-VERIFIED".to_string(),
         ];
+        if search_available {
+            caps.push("SEARCH".to_string());
+        }
         if starttls_available {
             caps.push("STARTTLS".to_string());
         }
@@ -279,18 +282,18 @@ mod tests {
     #[test]
     fn capabilities_with_ctx_code_is_101() {
         assert_eq!(
-            Response::capabilities_with_ctx(true, false, false, false).code,
+            Response::capabilities_with_ctx(true, false, false, false, false).code,
             101
         );
         assert_eq!(
-            Response::capabilities_with_ctx(false, true, false, false).code,
+            Response::capabilities_with_ctx(false, true, false, false, false).code,
             101
         );
     }
 
     #[test]
     fn capabilities_with_ctx_multiline_display() {
-        let r = Response::capabilities_with_ctx(false, false, false, false);
+        let r = Response::capabilities_with_ctx(false, false, false, false, false);
         let s = r.to_string();
         assert!(s.starts_with("101 Capability list follows\r\n"));
         assert!(s.contains("VERSION 2\r\n"));
@@ -300,7 +303,7 @@ mod tests {
     #[test]
     fn capabilities_omits_starttls_when_not_available() {
         // STARTTLS not advertised when starttls_available=false.
-        let r = Response::capabilities_with_ctx(false, false, false, false);
+        let r = Response::capabilities_with_ctx(false, false, false, false, false);
         assert!(
             !r.body.iter().any(|l| l == "STARTTLS"),
             "STARTTLS must not appear in CAPABILITIES when not available"
@@ -309,7 +312,7 @@ mod tests {
 
     #[test]
     fn capabilities_includes_starttls_when_available() {
-        let r = Response::capabilities_with_ctx(false, false, true, false);
+        let r = Response::capabilities_with_ctx(false, false, true, false, false);
         assert!(
             r.body.iter().any(|l| l == "STARTTLS"),
             "STARTTLS must appear in CAPABILITIES when available"
@@ -323,7 +326,7 @@ mod tests {
 
     #[test]
     fn capabilities_includes_did_verified_extension() {
-        let r = Response::capabilities_with_ctx(false, false, false, false);
+        let r = Response::capabilities_with_ctx(false, false, false, false, false);
         assert!(
             r.body.iter().any(|l| l == "X-USENET-IPFS-DID-VERIFIED"),
             "X-USENET-IPFS-DID-VERIFIED must appear in CAPABILITIES"
@@ -332,7 +335,7 @@ mod tests {
 
     #[test]
     fn capabilities_includes_sasl_oauthbearer_when_configured() {
-        let r = Response::capabilities_with_ctx(false, false, false, true);
+        let r = Response::capabilities_with_ctx(false, false, false, true, false);
         assert!(
             r.body.iter().any(|l| l == "SASL OAUTHBEARER"),
             "SASL OAUTHBEARER must appear in CAPABILITIES when configured"
@@ -341,10 +344,28 @@ mod tests {
 
     #[test]
     fn capabilities_omits_sasl_oauthbearer_when_not_configured() {
-        let r = Response::capabilities_with_ctx(false, false, false, false);
+        let r = Response::capabilities_with_ctx(false, false, false, false, false);
         assert!(
             !r.body.iter().any(|l| l == "SASL OAUTHBEARER"),
             "SASL OAUTHBEARER must not appear in CAPABILITIES when not configured"
+        );
+    }
+
+    #[test]
+    fn capabilities_includes_search_when_available() {
+        let r = Response::capabilities_with_ctx(false, false, false, false, true);
+        assert!(
+            r.body.iter().any(|l| l == "SEARCH"),
+            "SEARCH must appear in CAPABILITIES when search_available=true"
+        );
+    }
+
+    #[test]
+    fn capabilities_omits_search_when_not_available() {
+        let r = Response::capabilities_with_ctx(false, false, false, false, false);
+        assert!(
+            !r.body.iter().any(|l| l == "SEARCH"),
+            "SEARCH must not appear in CAPABILITIES when search_available=false"
         );
     }
 

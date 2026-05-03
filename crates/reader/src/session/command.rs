@@ -24,7 +24,8 @@ pub enum ArticleRange {
 /// LIST subcommands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListSubcommand {
-    Active,
+    /// LIST ACTIVE [wildmat] — optional wildmat filter.
+    Active(Option<String>),
     Newsgroups,
     OverviewFmt,
 }
@@ -180,9 +181,16 @@ pub fn parse_command(line: &str) -> Result<Command, ParseError> {
         },
 
         "LIST" => {
-            let sub = rest.split_ascii_whitespace().next().unwrap_or("ACTIVE");
-            match sub.to_ascii_uppercase().as_str() {
-                "ACTIVE" | "" => Ok(Command::List(ListSubcommand::Active)),
+            let mut toks = rest.split_ascii_whitespace();
+            let sub_upper = toks
+                .next()
+                .map(|s| s.to_ascii_uppercase())
+                .unwrap_or_else(|| "ACTIVE".to_string());
+            match sub_upper.as_str() {
+                "ACTIVE" => Ok(Command::List(ListSubcommand::Active(
+                    toks.next().map(str::to_string),
+                ))),
+                "" => Ok(Command::List(ListSubcommand::Active(None))),
                 "NEWSGROUPS" => Ok(Command::List(ListSubcommand::Newsgroups)),
                 "OVERVIEW.FMT" => Ok(Command::List(ListSubcommand::OverviewFmt)),
                 _ => Ok(Command::Unknown(line.to_string())),
@@ -419,7 +427,7 @@ mod tests {
     fn parse_list_no_arg_defaults_to_active() {
         assert_eq!(
             parse_command("LIST\r\n"),
-            Ok(Command::List(ListSubcommand::Active))
+            Ok(Command::List(ListSubcommand::Active(None)))
         );
     }
 
@@ -427,7 +435,15 @@ mod tests {
     fn parse_list_active() {
         assert_eq!(
             parse_command("LIST ACTIVE\r\n"),
-            Ok(Command::List(ListSubcommand::Active))
+            Ok(Command::List(ListSubcommand::Active(None)))
+        );
+    }
+
+    #[test]
+    fn parse_list_active_with_wildmat() {
+        assert_eq!(
+            parse_command("LIST ACTIVE comp.*\r\n"),
+            Ok(Command::List(ListSubcommand::Active(Some("comp.*".to_string()))))
         );
     }
 

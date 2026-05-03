@@ -8,7 +8,7 @@ use crate::{
             list_active, list_newsgroups, list_overview_fmt, newgroups, newnews,
             parse_nntp_datetime,
         },
-        context::{SelectedGroup, SessionContext},
+        context::SessionContext,
         response::Response,
         state::SessionState,
     },
@@ -53,8 +53,12 @@ pub fn dispatch(
                 // Do NOT remove the `&& !ctx.tls_active` guard.
                 ctx.starttls_available && !ctx.tls_active,
                 !auth_config.oidc_providers.is_empty(),
+                ctx.search_available,
             ),
             Command::Quit => Response::closing_connection(),
+            // RFC 4643 §2.2: AUTHINFO PASS received before USER in Authenticating
+            // state is out of sequence — 482, not 480.
+            Command::AuthinfoPass(_) => Response::authentication_out_of_sequence(),
             Command::AuthinfoUser(username) => {
                 // RFC 3977 §7.1.1: if TLS is required but not active, reject with 483.
                 if auth_config.required && !ctx.tls_active {
@@ -86,6 +90,7 @@ pub fn dispatch(
             // session that is already TLS-protected.
             ctx.starttls_available && !ctx.tls_active,
             !auth_config.oidc_providers.is_empty(),
+            ctx.search_available,
         ),
         Command::ModeReader => {
             if ctx.posting_allowed {
@@ -95,26 +100,18 @@ pub fn dispatch(
             }
         }
         Command::Quit => Response::closing_connection(),
-        Command::Group(name) => {
-            if ctx
-                .known_groups
-                .binary_search_by(|g| g.name.as_str().cmp(name.as_str()))
-                .is_err()
-            {
-                return Response::no_such_newsgroup();
-            }
-            match stoa_core::article::GroupName::new(name) {
-                Err(_) => Response::no_such_newsgroup(),
-                Ok(group) => {
-                    let group_str = group.as_str().to_owned();
-                    ctx.selected_group = Some(SelectedGroup {
-                        name: group,
-                        article_number: None,
-                    });
-                    ctx.state = SessionState::GroupSelected;
-                    Response::group_selected(&group_str, 0, 0, 0)
-                }
-            }
+        Command::Group(_) => {
+            // DECISION (rbe3.81): GROUP must be intercepted by lifecycle.rs before
+            // reaching dispatch.  lifecycle.rs calls handle_group_live which issues
+            // a live DB query and returns the real (count, low, high).  If dispatch
+            // were to handle GROUP it would return hardcoded zeros — a silent
+            // correctness trap.  Make it unreachable!() so a missing interception
+            // fails loudly rather than silently serving wrong data.
+            // Do NOT restore this arm with a 0,0,0 fallback.
+            unreachable!(
+                "GROUP must be intercepted by lifecycle.rs before reaching dispatch; \
+                 if this panics, the session lifecycle is missing the interception"
+            )
         }
         Command::Next | Command::Last => {
             if !ctx.state.group_selected() {
@@ -191,7 +188,9 @@ pub fn dispatch(
         }
         Command::StartTls => Response::new(502, "Command unavailable"),
         Command::List(sub) => match sub {
-            ListSubcommand::Active => list_active(&ctx.known_groups, None),
+            ListSubcommand::Active(ref wildmat) => {
+                list_active(&ctx.known_groups, wildmat.as_deref())
+            }
             ListSubcommand::Newsgroups => list_newsgroups(&ctx.known_groups, None),
             ListSubcommand::OverviewFmt => list_overview_fmt(),
         },
@@ -336,21 +335,13 @@ mod tests {
                 tls_active: false,
             },
         );
-        ctx.known_groups
-            .push(crate::session::commands::list::GroupInfo {
-                name: "comp.lang.rust".into(),
-                high: 0,
-                low: 0,
-                posting_allowed: true,
-                description: String::new(),
-            });
-        dispatch(
-            &mut ctx,
-            Command::Group("comp.lang.rust".into()),
-            &empty_auth(),
-            &no_certs(),
-            &no_issuers(),
-        );
+        // Set group selection directly: lifecycle.rs intercepts GROUP before
+        // dispatch() is called, so dispatch() cannot be used to set this up.
+        ctx.selected_group = Some(crate::session::context::SelectedGroup {
+            name: stoa_core::article::GroupName::new("comp.lang.rust".to_owned()).unwrap(),
+            article_number: None,
+        });
+        ctx.state = SessionState::GroupSelected;
         ctx
     }
 
@@ -359,7 +350,7 @@ mod tests {
         let mut ctx = ctx_authenticating();
         let resp = dispatch(
             &mut ctx,
-            Command::List(crate::session::command::ListSubcommand::Active),
+            Command::List(crate::session::command::ListSubcommand::Active(None)),
             &empty_auth(),
             &no_certs(),
             &no_issuers(),
@@ -726,110 +717,19 @@ mod tests {
         );
     }
 
+    /// RFC 4643 §2.2: AUTHINFO PASS before USER in Authenticating state must
+    /// return 482 (Authentication commands issued out of sequence), not 480.
     #[test]
-    fn group_unknown_returns_411() {
-        let mut ctx = ctx_active();
+    fn authinfo_pass_before_user_in_authenticating_returns_482() {
+        let mut ctx = ctx_authenticating();
         let resp = dispatch(
             &mut ctx,
-            Command::Group("no.such.group".into()),
+            Command::AuthinfoPass("password".into()),
             &empty_auth(),
             &no_certs(),
             &no_issuers(),
         );
-        assert_eq!(resp.code, 411);
-    }
-
-    #[test]
-    fn group_known_returns_211() {
-        let mut ctx = ctx_active();
-        ctx.known_groups
-            .push(crate::session::commands::list::GroupInfo {
-                name: "comp.lang.rust".into(),
-                high: 0,
-                low: 0,
-                posting_allowed: true,
-                description: String::new(),
-            });
-        let resp = dispatch(
-            &mut ctx,
-            Command::Group("comp.lang.rust".into()),
-            &empty_auth(),
-            &no_certs(),
-            &no_issuers(),
-        );
-        assert_eq!(resp.code, 211);
-    }
-
-    /// A group name that passes the `known_groups` membership check but fails
-    /// `GroupName::new` validation must return 411, not 211 with a None group.
-    #[test]
-    fn group_invalid_name_in_known_groups_returns_411() {
-        let mut ctx = ctx_active();
-        // Push a syntactically-invalid name into known_groups to simulate a
-        // misconfigured or adversarial state.
-        ctx.known_groups
-            .push(crate::session::commands::list::GroupInfo {
-                name: "invalid..double.dot".into(),
-                high: 0,
-                low: 0,
-                posting_allowed: true,
-                description: String::new(),
-            });
-        let resp = dispatch(
-            &mut ctx,
-            Command::Group("invalid..double.dot".into()),
-            &empty_auth(),
-            &no_certs(),
-            &no_issuers(),
-        );
-        assert_eq!(resp.code, 411, "invalid group name must return 411");
-        assert!(
-            ctx.selected_group.is_none(),
-            "selected_group must not be set after 411"
-        );
-    }
-
-    /// RFC 3977 §6.1.1: when GROUP returns 411, the previously selected group
-    /// must remain selected (session state is unchanged).
-    #[test]
-    fn group_invalid_name_preserves_prior_group_selection() {
-        // Start with a valid group selected.
-        let mut ctx = ctx_group_selected(); // selected_group = comp.lang.rust
-        let prior_group_name = ctx
-            .selected_group
-            .as_ref()
-            .map(|sg| sg.name.as_str().to_owned());
-
-        // Push a syntactically-invalid name so the known_groups check passes.
-        ctx.known_groups
-            .push(crate::session::commands::list::GroupInfo {
-                name: "bad..name".into(),
-                high: 0,
-                low: 0,
-                posting_allowed: true,
-                description: String::new(),
-            });
-
-        let resp = dispatch(
-            &mut ctx,
-            Command::Group("bad..name".into()),
-            &empty_auth(),
-            &no_certs(),
-            &no_issuers(),
-        );
-        assert_eq!(resp.code, 411, "invalid group name must return 411");
-        assert_eq!(
-            ctx.selected_group
-                .as_ref()
-                .map(|sg| sg.name.as_str().to_owned()),
-            prior_group_name,
-            "prior group selection must be preserved after 411"
-        );
-        assert_eq!(
-            ctx.state,
-            SessionState::GroupSelected,
-            "session state must remain GroupSelected after 411"
-        );
+        assert_eq!(resp.code, 482, "AUTHINFO PASS before USER must return 482");
     }
 
     #[test]
