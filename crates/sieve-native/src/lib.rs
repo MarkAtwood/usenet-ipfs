@@ -133,13 +133,25 @@ fn validate_stmt(stmt: &form::Stmt, depth: usize) -> Result<(), String> {
         match form {
             form::Form::Tag(t) if t == "comparator" => {
                 // The next form must be the comparator name string.
-                if let Some(form::Form::Str(name)) = iter.peek() {
-                    const KNOWN_COMPARATORS: &[&str] = &["i;ascii-casemap", "i;octet"];
-                    if !KNOWN_COMPARATORS.contains(&name.as_str()) {
-                        return Err(format!("unsupported comparator: {name}"));
+                match iter.peek() {
+                    Some(form::Form::Str(name)) => {
+                        const KNOWN_COMPARATORS: &[&str] = &["i;ascii-casemap", "i;octet"];
+                        if !KNOWN_COMPARATORS.contains(&name.as_str()) {
+                            return Err(format!("unsupported comparator: {name}"));
+                        }
+                        iter.next(); // consume the comparator name
+                    }
+                    Some(_) => {
+                        return Err(
+                            ":comparator tag must be followed by a string literal".to_string()
+                        );
+                    }
+                    None => {
+                        return Err(
+                            ":comparator tag at end of statement with no name".to_string()
+                        );
                     }
                 }
-                iter.next(); // consume the name (or whatever follows the tag)
             }
             form::Form::Tag(t) if t == "regex" => {
                 has_regex_tag = true;
@@ -456,6 +468,37 @@ mod tests {
         assert!(
             result.unwrap_err().contains("comparator"),
             "error must mention comparator"
+        );
+    }
+
+    /// RFC 5228 §2.7.2: `:comparator` must be followed by a string literal.
+    /// A non-string token after `:comparator` is a parse error — the parser
+    /// must not silently consume the next token and corrupt state.
+    #[test]
+    fn comparator_followed_by_non_str_is_parse_error() {
+        // `:comparator 42` — 42 is a Number token, not a Str.
+        let result = compile(b"if header :comparator 42 \"Subject\" \"test\" { keep; }");
+        assert!(
+            result.is_err(),
+            ":comparator followed by non-string must fail at compile"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("comparator"),
+            "error must mention comparator; got: {msg:?}"
+        );
+    }
+
+    /// RFC 5228 §4.1: `stop` halts execution; when no explicit action preceded
+    /// it the implicit keep applies.  Oracle: RFC 5228 §4.1 and §2.10.2.
+    #[test]
+    fn eval_stop_alone_yields_implicit_keep() {
+        let script = compile(b"stop;").unwrap();
+        let actions = evaluate(&script, &make_msg("test"), "", "");
+        assert_eq!(
+            actions,
+            vec![SieveAction::Keep],
+            "stop with no prior action must produce implicit Keep (RFC 5228 §4.1)"
         );
     }
 

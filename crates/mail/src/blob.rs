@@ -28,16 +28,24 @@ pub async fn blob_download(
     user: Option<Extension<AuthenticatedUser>>,
     Path((account_id, blob_id, _name)): Path<(String, String, String)>,
 ) -> Response<Body> {
-    // In authenticated mode, verify the caller owns the requested account.
-    if let Some(Extension(ref authenticated_user)) = user {
-        let expected = format!("u_{}", authenticated_user.0);
-        if account_id != expected {
+    // Authentication is always required; reject unauthenticated requests.
+    let authenticated_user = match user {
+        Some(Extension(ref u)) => u,
+        None => {
             return Response::builder()
-                .status(StatusCode::FORBIDDEN)
+                .status(StatusCode::UNAUTHORIZED)
                 .header(header::CONTENT_TYPE, "text/plain")
-                .body(Body::from("403 Forbidden"))
+                .body(Body::from("401 Unauthorized"))
                 .unwrap();
         }
+    };
+    let expected = format!("u_{}", authenticated_user.0);
+    if account_id != expected {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("403 Forbidden"))
+            .unwrap();
     }
 
     // Validate that blobId looks like a CID.
@@ -144,12 +152,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_blob_id_returns_400() {
+    async fn unauthenticated_returns_401() {
         let resp = blob_download(
             State(make_dev_state().await.0),
             None,
             Path((
-                "acc1".to_string(),
+                "u_alice".to_string(),
+                "not-a-cid".to_string(),
+                "message.eml".to_string(),
+            )),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn invalid_blob_id_returns_400() {
+        let user = Some(Extension(AuthenticatedUser("alice".to_string())));
+        let resp = blob_download(
+            State(make_dev_state().await.0),
+            user,
+            Path((
+                "u_alice".to_string(),
                 "not-a-cid".to_string(),
                 "message.eml".to_string(),
             )),
@@ -160,12 +184,13 @@ mod tests {
 
     #[tokio::test]
     async fn valid_cid_jmap_not_configured_returns_503() {
+        let user = Some(Extension(AuthenticatedUser("alice".to_string())));
         let valid_cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
         let resp = blob_download(
             State(make_dev_state().await.0),
-            None,
+            user,
             Path((
-                "acc1".to_string(),
+                "u_alice".to_string(),
                 valid_cid.to_string(),
                 "message.eml".to_string(),
             )),

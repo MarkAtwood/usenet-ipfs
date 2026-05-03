@@ -68,6 +68,12 @@ pub struct Ctx<'a> {
     /// are case-insensitive; storage uses lowercased keys throughout (see
     /// `expand_vars`).
     pub variables_enabled: bool,
+    /// The last explicit disposition action taken before a `stop` (RFC 5228 §4.1).
+    ///
+    /// RFC 5228 §4.1: `stop` halts script execution; any actions already taken
+    /// remain in effect.  When `stop` is encountered, `eval_script` returns
+    /// `last_action` if one was recorded, or implicit Keep otherwise.
+    pub last_action: Option<SieveAction>,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,13 +127,20 @@ pub fn eval_script(
         envelope_to,
         variables: HashMap::new(),
         variables_enabled,
+        last_action: None,
     };
 
     let mut actions: Vec<SieveAction> = Vec::new();
 
     match eval_stmt_list(script, &mut ctx) {
-        None | Some(StmtResult::Continue) | Some(StmtResult::Stop) => {
+        None | Some(StmtResult::Continue) => {
             actions.push(SieveAction::Keep);
+        }
+        // RFC 5228 §4.1: `stop` halts execution; actions already taken remain
+        // in effect.  Return the last recorded explicit action, or implicit
+        // Keep if no explicit action preceded the `stop`.
+        Some(StmtResult::Stop) => {
+            actions.push(ctx.last_action.take().unwrap_or(SieveAction::Keep));
         }
         Some(StmtResult::Keep) => actions.push(SieveAction::Keep),
         Some(StmtResult::Discard) => actions.push(SieveAction::Discard),
@@ -162,19 +175,29 @@ fn eval_stmt(stmt: &Stmt, ctx: &mut Ctx<'_>) -> StmtResult {
 
         // fileinto "folder"
         [Form::Word(w), Form::Str(folder)] if w == "fileinto" => {
-            StmtResult::FileInto(expand_vars(folder, ctx))
+            let folder = expand_vars(folder, ctx);
+            ctx.last_action = Some(SieveAction::FileInto(folder.clone()));
+            StmtResult::FileInto(folder)
         }
 
         // reject "reason"
         [Form::Word(w), Form::Str(reason)] if w == "reject" => {
-            StmtResult::Reject(expand_vars(reason, ctx))
+            let reason = expand_vars(reason, ctx);
+            ctx.last_action = Some(SieveAction::Reject(reason.clone()));
+            StmtResult::Reject(reason)
         }
 
         // discard
-        [Form::Word(w)] if w == "discard" => StmtResult::Discard,
+        [Form::Word(w)] if w == "discard" => {
+            ctx.last_action = Some(SieveAction::Discard);
+            StmtResult::Discard
+        }
 
         // keep
-        [Form::Word(w)] if w == "keep" => StmtResult::Keep,
+        [Form::Word(w)] if w == "keep" => {
+            ctx.last_action = Some(SieveAction::Keep);
+            StmtResult::Keep
+        }
 
         // stop
         [Form::Word(w)] if w == "stop" => StmtResult::Stop,

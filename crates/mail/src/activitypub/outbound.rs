@@ -246,18 +246,24 @@ async fn deliver_one(
 
 /// Percent-encode a Message-ID for use in a URL path segment.
 ///
-/// Replaces `<`, `>`, `@`, and space with percent-encoded equivalents.
+/// Encodes every byte that is not an RFC 3986 unreserved character
+/// (`A-Z a-z 0-9 - . _ ~`).  This prevents path traversal and
+/// double-encoding corruption from characters such as `/`, `?`, `#`,
+/// `%`, `&`, `=`, `+`, `@`, and `<`/`>`.
 pub(super) fn percent_encode_msgid(msgid: &str) -> String {
-    msgid
-        .chars()
-        .flat_map(|c| match c {
-            '<' => vec!['%', '3', 'C'],
-            '>' => vec!['%', '3', 'E'],
-            '@' => vec!['%', '4', '0'],
-            ' ' => vec!['%', '2', '0'],
-            c => vec![c],
-        })
-        .collect()
+    let mut out = String::with_capacity(msgid.len() * 3);
+    for b in msgid.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            let hi = "0123456789ABCDEF".as_bytes()[(b >> 4) as usize] as char;
+            let lo = "0123456789ABCDEF".as_bytes()[(b & 0xF) as usize] as char;
+            out.push('%');
+            out.push(hi);
+            out.push(lo);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
