@@ -27,21 +27,33 @@ pub enum SmtpRelayError {
 
 impl SmtpRelayError {
     /// Returns true if the message should be retried (left in queue).
+    ///
+    /// Uses an exhaustive `match` (no `_` arm) so the compiler will reject a
+    /// build that adds a new variant without classifying it here.
     pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            SmtpRelayError::Transient(_) | SmtpRelayError::Io(_) | SmtpRelayError::TlsHandshake(_)
-        )
+        match self {
+            SmtpRelayError::Transient(_)
+            | SmtpRelayError::Io(_)
+            | SmtpRelayError::TlsHandshake(_) => true,
+            SmtpRelayError::Permanent(_)
+            | SmtpRelayError::AuthFailed
+            | SmtpRelayError::ProtocolError(_) => false,
+        }
     }
 
     /// Returns true if the message should be moved to dead-letter (no retry).
+    ///
+    /// Uses an exhaustive `match` (no `_` arm) so the compiler will reject a
+    /// build that adds a new variant without classifying it here.
     pub fn is_permanent(&self) -> bool {
-        matches!(
-            self,
+        match self {
             SmtpRelayError::Permanent(_)
-                | SmtpRelayError::AuthFailed
-                | SmtpRelayError::ProtocolError(_)
-        )
+            | SmtpRelayError::AuthFailed
+            | SmtpRelayError::ProtocolError(_) => true,
+            SmtpRelayError::Transient(_)
+            | SmtpRelayError::Io(_)
+            | SmtpRelayError::TlsHandshake(_) => false,
+        }
     }
 
     /// Returns true if the peer itself should be marked down after this error.
@@ -51,8 +63,18 @@ impl SmtpRelayError {
     /// Subsequent messages to the same peer can be delivered without a backoff
     /// penalty.  All other error kinds indicate peer-level problems that warrant
     /// backing off.
+    ///
+    /// Uses an exhaustive `match` (no `_` arm) so the compiler will reject a
+    /// build that adds a new variant without classifying it here.
     pub fn marks_peer_down(&self) -> bool {
-        !matches!(self, SmtpRelayError::Permanent(_))
+        match self {
+            SmtpRelayError::Permanent(_) => false,
+            SmtpRelayError::Transient(_)
+            | SmtpRelayError::Io(_)
+            | SmtpRelayError::TlsHandshake(_)
+            | SmtpRelayError::AuthFailed
+            | SmtpRelayError::ProtocolError(_) => true,
+        }
     }
 }
 
