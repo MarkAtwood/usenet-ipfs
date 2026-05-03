@@ -89,9 +89,18 @@ use crate::ipld::codec::CODEC_RAW;
 /// # Arguments
 /// - `header_bytes`: verbatim RFC 5536 wire header bytes
 /// - `body_bytes`: dot-unstuffed NNTP body bytes
+///
+/// # Panics
+///
+/// Panics if `header_bytes.len()` exceeds [`u32::MAX`] (≈4 GiB).  This cannot
+/// happen in practice: [`validate_article_ingress`](crate::validation::validate_article_ingress)
+/// limits every header field to 998 bytes, making the maximum realistic header
+/// length far below this bound.  Callers that bypass validation (e.g. test
+/// helpers constructing artificial articles) must ensure the header slice
+/// fits in a `u32`.
 pub fn cid_for_article(header_bytes: &[u8], body_bytes: &[u8]) -> Cid {
-    let header_len =
-        u32::try_from(header_bytes.len()).expect("header_bytes length must fit in u32");
+    let header_len = u32::try_from(header_bytes.len())
+        .expect("header_bytes length exceeds u32::MAX — caller must enforce size limits via validate_article_ingress");
     let mut combined = Vec::with_capacity(4 + header_bytes.len() + body_bytes.len());
     combined.extend_from_slice(&header_len.to_be_bytes());
     combined.extend_from_slice(header_bytes);

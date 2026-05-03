@@ -141,11 +141,11 @@ pub fn validate_message_id(id: &str) -> Result<(), ValidationError> {
 ///    present and non-empty; Newsgroups is the 6th mandatory header, checked
 ///    separately in step 3 below
 /// 2. Message-ID format valid: must match `<local@domain>` with no whitespace
-/// 3. Newsgroups not empty
-/// 4. All group names in Newsgroups are valid RFC 3977 group names
-/// 5. If `config.allowed_groups` is `Some`, at least one group must match the filter
-/// 6. All header field values ≤ 998 bytes (RFC 5322 §2.1.1)
-/// 7. Article body size ≤ `config.max_article_bytes`
+/// 3. Newsgroups not empty; crosspost count ≤ `MAX_NEWSGROUPS`; group name
+///    format is guaranteed by the `GroupName` type at construction time
+/// 4. If `config.allowed_groups` is `Some`, at least one group must match the filter
+/// 5. All header field values ≤ 998 bytes (RFC 5322 §2.1.1)
+/// 6. Article body size ≤ `config.max_article_bytes`
 pub fn validate_article_ingress(
     article: &Article,
     config: &ValidationConfig,
@@ -199,7 +199,7 @@ pub fn validate_article_ingress(
         }
     }
 
-    // 6. Header field values ≤ 998 bytes (RFC 5322 §2.1.1); no bare CR/LF or NUL.
+    // 5. Header field values ≤ 998 bytes (RFC 5322 §2.1.1); no bare CR/LF or NUL.
     //
     // PRECONDITION: callers MUST unfold RFC 5322 obs-fold (CRLF followed by
     // whitespace) before constructing the `Article` passed to this function.
@@ -286,7 +286,7 @@ pub fn validate_article_ingress(
         }
     }
 
-    // 7. Body size limit.
+    // 6. Body size limit.
     let body_len = article.body.len();
     if body_len > config.max_article_bytes {
         return Err(ValidationError::ArticleTooBig {

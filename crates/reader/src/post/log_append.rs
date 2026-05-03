@@ -59,11 +59,16 @@ pub async fn append_to_groups<S: LogStorage>(
     newsgroups: &[GroupName],
     injection_source: InjectionSource,
 ) -> Result<AppendResult, Response> {
-    debug_assert_eq!(
-        hlc_timestamps.len(),
-        newsgroups.len(),
-        "one HLC timestamp required per newsgroup"
-    );
+    if hlc_timestamps.len() != newsgroups.len() {
+        return Err(Response::new(
+            500,
+            format!(
+                "Internal error: hlc_timestamps length {} != newsgroups length {}",
+                hlc_timestamps.len(),
+                newsgroups.len()
+            ),
+        ));
+    }
 
     let mut assignments = Vec::with_capacity(newsgroups.len());
 

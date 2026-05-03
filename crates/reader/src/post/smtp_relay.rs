@@ -23,7 +23,13 @@ use stoa_smtp::SmtpRelayQueue;
 pub fn extract_email_recipients(article_bytes: &[u8]) -> Vec<String> {
     let header_end = find_header_end(article_bytes);
     let header_bytes = &article_bytes[..header_end];
-    let headers = String::from_utf8_lossy(header_bytes);
+    let headers = match std::str::from_utf8(header_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!("smtp relay: article headers are not valid UTF-8; skipping relay");
+            return Vec::new();
+        }
+    };
 
     let mut recipients = Vec::new();
     for line in headers.lines() {
@@ -44,7 +50,10 @@ pub fn extract_email_recipients(article_bytes: &[u8]) -> Vec<String> {
 pub fn extract_mail_from(article_bytes: &[u8]) -> String {
     let header_end = find_header_end(article_bytes);
     let header_bytes = &article_bytes[..header_end];
-    let headers = String::from_utf8_lossy(header_bytes);
+    let headers = match std::str::from_utf8(header_bytes) {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
 
     for line in headers.lines() {
         if line.to_ascii_lowercase().starts_with("from:") {
@@ -189,6 +198,19 @@ mod tests {
         let article = b"From: bob@example.com\r\nSubject: hi\r\n\r\nBody";
         let result = extract_email_recipients(article);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn non_utf8_headers_returns_empty() {
+        // 0xFF is not valid UTF-8. from_utf8_lossy would replace it with U+FFFD
+        // and potentially corrupt an email address. The correct behaviour is to
+        // return an empty list and skip relay entirely.
+        let article = b"To: alice\xFF@example.com\r\n\r\nBody";
+        let result = extract_email_recipients(article);
+        assert!(
+            result.is_empty(),
+            "non-UTF-8 headers must not produce relay recipients: {result:?}"
+        );
     }
 
     // ── extract_mail_from ────────────────────────────────────────────────────

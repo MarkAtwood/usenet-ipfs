@@ -12,9 +12,13 @@
 //! - SQLite: `sqlite:///absolute/path/to/file.db` or `sqlite::memory:`
 //! - PostgreSQL: `postgres://user:pass@host/dbname` or `postgresql://...`
 
+use std::sync::OnceLock;
+
 use sqlx::any::AnyPoolOptions;
 
 use crate::error::StorageError;
+
+static DRIVERS_INSTALLED: OnceLock<()> = OnceLock::new();
 
 /// Returns `true` if `url` is a PostgreSQL URL.
 pub fn is_postgres_url(url: &str) -> bool {
@@ -33,7 +37,7 @@ pub async fn open_any_pool(url: &str, pool_size: u32) -> Result<sqlx::AnyPool, S
 
 /// Open an [`sqlx::AnyPool`] from a database URL, returning an error on failure.
 pub async fn try_open_any_pool(url: &str, pool_size: u32) -> Result<sqlx::AnyPool, String> {
-    sqlx::any::install_default_drivers();
+    DRIVERS_INSTALLED.get_or_init(|| sqlx::any::install_default_drivers());
 
     if is_postgres_url(url) {
         AnyPoolOptions::new()

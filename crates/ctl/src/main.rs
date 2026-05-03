@@ -220,9 +220,13 @@ fn cmd_metrics(client: &AdminClient) -> Result<(), String> {
 
 /// Percent-encode a string for use in a URL query parameter.
 ///
-/// Encodes each byte that is not in the unreserved set (RFC 3986 §2.3) plus
-/// `+` (which is safe in newsgroup names and must not be encoded — the
-/// server-side query parser does not decode `%2B`).
+/// Characters in the RFC 3986 §2.3 unreserved set (ALPHA / DIGIT / `-` / `_`
+/// / `.` / `~`) plus `+` (used in some newsgroup names) are passed through
+/// unchanged.  All other bytes — including `#` (fragment delimiter), `?`
+/// (query delimiter), and `/` (path delimiter) — are encoded as `%XX`.
+/// RFC 3977 group names cannot contain `#` or `?`, but encoding them
+/// unconditionally prevents URL-structure corruption if a malformed name is
+/// passed.
 ///
 /// Operating on bytes rather than Unicode scalar values ensures that
 /// multi-byte UTF-8 sequences are encoded correctly (e.g. U+00E9 é →
@@ -288,5 +292,15 @@ mod tests {
         // U+00E9 (é) encodes as UTF-8 bytes 0xC3 0xA9, so the correct
         // percent-encoding is %C3%A9, not the incorrect single-byte %E9.
         assert_eq!(percent_encode("caf\u{00E9}"), "caf%C3%A9");
+    }
+
+    #[test]
+    fn percent_encode_hash_and_query_are_encoded() {
+        // '#' and '?' are URL-structure delimiters that must be encoded when
+        // they appear inside a query-string value.  RFC 3977 group names
+        // cannot contain these characters, but encoding them unconditionally
+        // prevents URL-structure corruption if a malformed name is supplied.
+        assert_eq!(percent_encode("a#b"), "a%23b");
+        assert_eq!(percent_encode("a?b"), "a%3Fb");
     }
 }

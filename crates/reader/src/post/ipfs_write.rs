@@ -187,10 +187,16 @@ impl IpfsBlockStore for KuboBlockStore {
     }
 
     async fn put_block(&self, cid: Cid, data: Vec<u8>) -> Result<(), IpfsWriteError> {
-        self.client
+        let returned_cid = self
+            .client
             .block_put(&data, cid.codec())
             .await
             .map_err(|e| IpfsWriteError::WriteFailed(e.to_string()))?;
+        if returned_cid != cid {
+            return Err(IpfsWriteError::WriteFailed(format!(
+                "CID mismatch: Kubo returned {returned_cid} but expected {cid}"
+            )));
+        }
         self.cache_put(&cid, &data).await;
         Ok(())
     }
