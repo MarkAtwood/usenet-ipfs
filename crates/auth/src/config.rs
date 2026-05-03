@@ -123,8 +123,16 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     /// Returns `true` when `username` is in the operator list.
+    ///
+    /// Comparison is case-insensitive (ASCII-lowercase normalization) because
+    /// OIDC providers may deliver the same identity in mixed or lowercase form
+    /// depending on the IdP, while the operator may have configured the username
+    /// with different casing in the config file.
     pub fn is_operator(&self, username: &str) -> bool {
-        self.operator_usernames.iter().any(|u| u == username)
+        let lower = username.to_ascii_lowercase();
+        self.operator_usernames
+            .iter()
+            .any(|u| u.to_ascii_lowercase() == lower)
     }
 
     /// Returns `true` when no credentials are configured and auth is not
@@ -206,5 +214,17 @@ mod tests {
     fn is_operator_returns_false_when_list_empty() {
         let cfg = AuthConfig::default();
         assert!(!cfg.is_operator("admin"));
+    }
+
+    #[test]
+    fn is_operator_is_case_insensitive() {
+        let mut cfg = AuthConfig::default();
+        cfg.operator_usernames = vec!["Admin@Example.COM".to_string()];
+        // Token-delivered username in all lowercase must still match.
+        assert!(cfg.is_operator("admin@example.com"));
+        // All-uppercase must also match.
+        assert!(cfg.is_operator("ADMIN@EXAMPLE.COM"));
+        // Non-member must still be rejected.
+        assert!(!cfg.is_operator("other@example.com"));
     }
 }
