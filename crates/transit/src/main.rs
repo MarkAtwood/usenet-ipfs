@@ -21,6 +21,7 @@ use stoa_transit::{
     instance_id::ensure_instance_node_id,
     peering::{
         auth::parse_trusted_peer_keys,
+        backpressure::IpfsLatencyMonitor,
         blacklist::BlacklistConfig,
         ingestion_queue::ingestion_queue,
         pipeline::{
@@ -392,6 +393,7 @@ struct PipelineArgs<'a> {
     transit_pool: &'a sqlx::AnyPool,
     ipns_tx: &'a Option<tokio::sync::mpsc::Sender<IpnsEvent>>,
     pin_service_filters: &'a [(String, GroupPolicy)],
+    ipfs_latency_monitor: Arc<IpfsLatencyMonitor>,
 }
 
 /// Outcome of a `run_pipeline_and_notify` call.
@@ -460,7 +462,9 @@ async fn run_pipeline_and_notify(
     )
     .await
     {
-        Ok((result, _metrics)) => {
+        Ok((result, metrics)) => {
+            args.ipfs_latency_monitor
+                .record_latency_ms(metrics.ipfs_write_latency_ms as f64);
             info!(
                 cid = %result.cid,
                 groups = ?result.groups,
@@ -1006,6 +1010,10 @@ async fn main() {
 
     // ── Pipeline drain task ───────────────────────────────────────────────────
 
+    // Shared IPFS write latency monitor — records every pipeline's IPFS write
+    // duration and activates backpressure when the EMA exceeds the threshold.
+    let ipfs_latency_monitor = IpfsLatencyMonitor::new_default();
+
     // Extract (service_name, filter) pairs for the pipeline hook.
     // Avoids moving the full config (with PinningApiKey) into the async closure.
     // GroupFilter patterns were validated in Config::validate(), so expect() cannot fail.
@@ -1051,6 +1059,7 @@ async fn main() {
         let verification_store_drain = Arc::clone(&verification_store);
         let dkim_authenticator_drain = Arc::clone(&dkim_authenticator);
         let reload_drain = Arc::clone(&reload_state);
+        let latency_monitor_drain = Arc::clone(&ipfs_latency_monitor);
 
         tokio::spawn(async move {
             while let Some(article) = ingestion_receiver.recv().await {
@@ -1072,6 +1081,7 @@ async fn main() {
                     transit_pool: &transit_pool_drain,
                     ipns_tx: &ipns_tx_drain,
                     pin_service_filters: &pin_service_filters,
+                    ipfs_latency_monitor: Arc::clone(&latency_monitor_drain),
                 };
                 run_pipeline_and_notify(
                     &article.bytes,
@@ -1088,7 +1098,7 @@ async fn main() {
     // ── Staging drain task (only when [staging] is configured) ────────────────
 
     let mut staging_shutdown_opt: Option<tokio::sync::watch::Sender<bool>> = None;
-    let mut staging_drain_opt: Option<tokio::task::JoinHandle<()>> = None;
+    let mut staging_drain_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     if let Some(staging) = staging_store {
         // Log how many articles survived the previous run.
@@ -1112,127 +1122,137 @@ async fn main() {
             Err(e) => warn!("staging: cleanup_orphaned_files failed: {e}"),
         }
 
-        let (staging_shutdown_tx, mut staging_shutdown_rx) = tokio::sync::watch::channel(false);
+        let (staging_shutdown_tx, staging_shutdown_rx) = tokio::sync::watch::channel(false);
         staging_shutdown_opt = Some(staging_shutdown_tx);
 
-        let ipfs = Arc::clone(&ipfs_store);
-        let msgid_map_drain = Arc::clone(&msgid_map);
-        let log_storage_drain = Arc::clone(&log_storage);
-        let signing_key_drain = Arc::clone(&signing_key);
-        let hlc_drain = Arc::clone(&hlc);
-        let local_hostname_drain = local_hostname_staging;
-        let transit_pool_drain = Arc::clone(&transit_pool);
-        let ipns_tx_drain = ipns_tx_staging;
-        let pin_service_filters = pin_service_filters_staging;
-        let verification_store_drain = verification_store_staging;
-        let dkim_authenticator_drain = dkim_authenticator_staging;
-        let reload_staging = reload_state_staging;
+        let drain_workers = staging.config.drain_workers.max(1) as usize;
+        info!(drain_workers, "starting staging drain workers");
 
-        staging_drain_opt = Some(tokio::spawn(async move {
-            loop {
-                match staging.drain_one().await {
-                    Ok(None) => {
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-                            _ = staging_shutdown_rx.changed() => { break; }
+        for _ in 0..drain_workers {
+            let staging = Arc::clone(&staging);
+            let mut staging_shutdown_rx = staging_shutdown_rx.clone();
+            let ipfs = Arc::clone(&ipfs_store);
+            let msgid_map_drain = Arc::clone(&msgid_map);
+            let log_storage_drain = Arc::clone(&log_storage);
+            let signing_key_drain = Arc::clone(&signing_key);
+            let hlc_drain = Arc::clone(&hlc);
+            let local_hostname_drain = local_hostname_staging.clone();
+            let transit_pool_drain = Arc::clone(&transit_pool);
+            let ipns_tx_drain = ipns_tx_staging.clone();
+            let pin_service_filters = pin_service_filters_staging.clone();
+            let verification_store_drain = Arc::clone(&verification_store_staging);
+            let dkim_authenticator_drain = Arc::clone(&dkim_authenticator_staging);
+            let reload_staging = Arc::clone(&reload_state_staging);
+            let latency_monitor_staging = Arc::clone(&ipfs_latency_monitor);
+
+            staging_drain_handles.push(tokio::spawn(async move {
+                loop {
+                    match staging.drain_one().await {
+                        Ok(None) => {
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                                _ = staging_shutdown_rx.changed() => { break; }
+                            }
                         }
-                    }
-                    Ok(Some(article)) => {
-                        let trusted_keys_snap =
-                            Arc::from(reload_staging.trusted_keys.read().await.clone());
-                        let group_filter_current = reload_staging.group_filter.read().await.clone();
-                        let pipeline_args = PipelineArgs {
-                            hlc: &hlc_drain,
-                            signing_key: Arc::clone(&signing_key_drain),
-                            local_hostname: &local_hostname_drain,
-                            verify_store: Some(&verification_store_drain),
-                            trusted_keys: trusted_keys_snap,
-                            dkim_auth: Some(&dkim_authenticator_drain),
-                            group_filter: group_filter_current,
-                            ipfs: &*ipfs,
-                            msgid_map: &msgid_map_drain,
-                            log_storage: log_storage_drain.as_ref(),
-                            transit_pool: &transit_pool_drain,
-                            ipns_tx: &ipns_tx_drain,
-                            pin_service_filters: &pin_service_filters,
-                        };
-                        // Maximum transient-failure retries before the article
-                        // is treated as permanently broken and purged.
-                        const MAX_STAGING_RETRIES: i64 = 10;
+                        Ok(Some(article)) => {
+                            let trusted_keys_snap =
+                                Arc::from(reload_staging.trusted_keys.read().await.clone());
+                            let group_filter_current =
+                                reload_staging.group_filter.read().await.clone();
+                            let pipeline_args = PipelineArgs {
+                                hlc: &hlc_drain,
+                                signing_key: Arc::clone(&signing_key_drain),
+                                local_hostname: &local_hostname_drain,
+                                verify_store: Some(&verification_store_drain),
+                                trusted_keys: trusted_keys_snap,
+                                dkim_auth: Some(&dkim_authenticator_drain),
+                                group_filter: group_filter_current,
+                                ipfs: &*ipfs,
+                                msgid_map: &msgid_map_drain,
+                                log_storage: log_storage_drain.as_ref(),
+                                transit_pool: &transit_pool_drain,
+                                ipns_tx: &ipns_tx_drain,
+                                pin_service_filters: &pin_service_filters,
+                                ipfs_latency_monitor: Arc::clone(&latency_monitor_staging),
+                            };
+                            // Maximum transient-failure retries before the article
+                            // is treated as permanently broken and purged.
+                            const MAX_STAGING_RETRIES: i64 = 10;
 
-                        match run_pipeline_and_notify(
-                            &article.bytes,
-                            &article.message_id,
-                            "staged article ingested",
-                            &pipeline_args,
-                        )
-                        .await
-                        {
-                            PipelineOutcome::Success => {
-                                if let Err(e) = staging.complete(&article).await {
-                                    warn!(
-                                        msgid = %article.message_id,
-                                        "could not complete staging record: {e}"
-                                    );
-                                }
-                            }
-                            PipelineOutcome::PermanentFailure => {
-                                warn!(
-                                    msgid = %article.message_id,
-                                    "permanent pipeline failure; purging staging row"
-                                );
-                                if let Err(e) = staging.purge(&article).await {
-                                    warn!(
-                                        msgid = %article.message_id,
-                                        "could not purge staging record: {e}"
-                                    );
-                                }
-                            }
-                            PipelineOutcome::TransientFailure => {
-                                match staging.increment_retry_count(&article).await {
-                                    Ok(new_count) if new_count >= MAX_STAGING_RETRIES => {
+                            match run_pipeline_and_notify(
+                                &article.bytes,
+                                &article.message_id,
+                                "staged article ingested",
+                                &pipeline_args,
+                            )
+                            .await
+                            {
+                                PipelineOutcome::Success => {
+                                    if let Err(e) = staging.complete(&article).await {
                                         warn!(
                                             msgid = %article.message_id,
-                                            retry_count = new_count,
-                                            "transient failure exceeded max retries; \
-                                             purging staging row"
+                                            "could not complete staging record: {e}"
                                         );
-                                        if let Err(e) = staging.purge(&article).await {
+                                    }
+                                }
+                                PipelineOutcome::PermanentFailure => {
+                                    warn!(
+                                        msgid = %article.message_id,
+                                        "permanent pipeline failure; purging staging row"
+                                    );
+                                    if let Err(e) = staging.purge(&article).await {
+                                        warn!(
+                                            msgid = %article.message_id,
+                                            "could not purge staging record: {e}"
+                                        );
+                                    }
+                                }
+                                PipelineOutcome::TransientFailure => {
+                                    match staging.increment_retry_count(&article).await {
+                                        Ok(new_count) if new_count >= MAX_STAGING_RETRIES => {
                                             warn!(
                                                 msgid = %article.message_id,
-                                                "could not purge staging record: {e}"
+                                                retry_count = new_count,
+                                                "transient failure exceeded max retries; \
+                                                 purging staging row"
+                                            );
+                                            if let Err(e) = staging.purge(&article).await {
+                                                warn!(
+                                                    msgid = %article.message_id,
+                                                    "could not purge staging record: {e}"
+                                                );
+                                            }
+                                        }
+                                        Ok(new_count) => {
+                                            warn!(
+                                                msgid = %article.message_id,
+                                                retry_count = new_count,
+                                                "transient failure; will retry"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                msgid = %article.message_id,
+                                                "could not increment retry count: {e}; \
+                                                 article remains claimed until next restart"
                                             );
                                         }
                                     }
-                                    Ok(new_count) => {
-                                        warn!(
-                                            msgid = %article.message_id,
-                                            retry_count = new_count,
-                                            "transient failure; will retry"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            msgid = %article.message_id,
-                                            "could not increment retry count: {e}; \
-                                             article remains claimed until next restart"
-                                        );
-                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!("staging drain error: {e}");
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
-                            _ = staging_shutdown_rx.changed() => { break; }
+                        Err(e) => {
+                            warn!("staging drain error: {e}");
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                                _ = staging_shutdown_rx.changed() => { break; }
+                            }
                         }
                     }
                 }
-            }
-            info!("staging drain task stopped");
-        }));
+                info!("staging drain task stopped");
+            }));
+        }
     }
 
     // ── Peering TCP listener (atu) ────────────────────────────────────────────
@@ -1439,10 +1459,10 @@ async fn main() {
         }
     }
 
-    // Signal the staging drain task to stop (if running), then wait briefly.
+    // Signal the staging drain tasks to stop (if running), then wait briefly.
     if let Some(shutdown_tx) = staging_shutdown_opt {
         let _ = shutdown_tx.send(true);
-        if let Some(staging_handle) = staging_drain_opt {
+        for staging_handle in staging_drain_handles {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(drain_timeout_secs),
                 staging_handle,

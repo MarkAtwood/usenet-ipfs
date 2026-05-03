@@ -6,8 +6,11 @@ use stoa_core::{error::StorageError, msgid_map::MsgIdMap};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-/// Maximum article body size accepted from a remote peer (5 MiB).
-const MAX_ARTICLE_BYTES: usize = 5 * 1024 * 1024;
+/// Maximum article body size accepted from a remote peer.
+///
+/// Matches the ingestion pipeline limit so articles are never fetched
+/// only to be rejected at ingestion due to exceeding the size cap.
+use crate::peering::ingestion::MAX_ARTICLE_BYTES;
 
 /// Configuration for the suck pull import.
 #[derive(Debug, Clone)]
@@ -389,7 +392,8 @@ async fn fetch_article(
         body.extend_from_slice(b"\r\n");
         if body.len() > MAX_ARTICLE_BYTES {
             tracing::warn!(
-                "suck_pull: article {msgid} exceeded {MAX_ARTICLE_BYTES} bytes; dropping"
+                "suck_pull: article {msgid} exceeded {} bytes; dropping",
+                MAX_ARTICLE_BYTES
             );
             return FetchResult::Failed;
         }

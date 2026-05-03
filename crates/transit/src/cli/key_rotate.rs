@@ -68,8 +68,19 @@ pub fn build_rotation_article(
 ) -> Vec<u8> {
     let message_id = format!("<rotate-{timestamp_ms}@{node_id}.stoa>");
 
+    // RFC 2822 date: format timestamp_ms as "Dow, DD Mon YYYY HH:MM:SS +0000"
+    let date_rfc2822 = {
+        use chrono::{DateTime, Utc};
+        let secs = (timestamp_ms / 1000) as i64;
+        DateTime::<Utc>::from_timestamp(secs, 0)
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+            .format("%a, %d %b %Y %H:%M:%S +0000")
+            .to_string()
+    };
+
     let mut out = String::new();
     out.push_str("From: key-rotation@stoa\r\n");
+    out.push_str(&format!("Date: {date_rfc2822}\r\n"));
     out.push_str(&format!("Newsgroups: {group}\r\n"));
     out.push_str("Subject: Key rotation announcement\r\n");
     out.push_str(&format!("Message-ID: {message_id}\r\n"));
@@ -190,6 +201,7 @@ mod tests {
             "testnode",
         );
         let text = String::from_utf8_lossy(&article);
+        assert!(text.contains("Date: "), "missing Date header: {text}");
         assert!(
             text.contains("X-Key-Rotation: new-key"),
             "missing X-Key-Rotation: {text}"

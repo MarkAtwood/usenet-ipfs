@@ -29,9 +29,14 @@ pub async fn cmd_status(
         .await
         .unwrap_or(0);
 
+    let now_ms_peers = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
     let peer_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM peers WHERE blacklisted_until IS NULL OR blacklisted_until = 0",
+        "SELECT COUNT(*) FROM peers WHERE blacklisted_until IS NULL OR blacklisted_until <= ?",
     )
+    .bind(now_ms_peers)
     .fetch_one(pool)
     .await
     .unwrap_or(0);
