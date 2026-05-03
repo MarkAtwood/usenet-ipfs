@@ -179,7 +179,14 @@ pub async fn handle_list(
         let news_part = pattern.strip_prefix("News/").unwrap_or("");
         let end = news_part.find(['*', '%']).unwrap_or(news_part.len());
         if end > 0 {
-            Some(format!("{}%", &news_part[..end]))
+            let literal = &news_part[..end];
+            // Escape LIKE metacharacters so '_' and '%' in group names are
+            // matched literally; '\\' is the ESCAPE char in the query below.
+            let escaped = literal
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            Some(format!("{escaped}%"))
         } else {
             None
         }
@@ -188,7 +195,8 @@ pub async fn handle_list(
     let rows: Vec<(String,)> = match db_prefix {
         Some(like_pat) => {
             match sqlx::query_as(
-                "SELECT mailbox FROM imap_uid_validity WHERE mailbox LIKE ? ORDER BY mailbox",
+                "SELECT mailbox FROM imap_uid_validity \
+                 WHERE mailbox LIKE ? ESCAPE '\\' ORDER BY mailbox",
             )
             .bind(like_pat)
             .fetch_all(pool)
@@ -803,6 +811,49 @@ mod tests {
                 panic!("expected Data::List");
             }
         }
+    }
+
+    /// RFC 3501 §6.3.8: reference name is a literal prefix, not a pattern.
+    /// Underscore is a LIKE metacharacter; it must be escaped so LIST "a_b" "*"
+    /// does not match "axb" or "a1b" in the DB.
+    #[tokio::test]
+    async fn handle_list_underscore_in_reference_matches_literally() {
+        let pool = make_pool().await;
+        // Insert two groups: one where _ is literal, one where it would match
+        // if '_' were treated as LIKE wildcard.
+        get_or_create_uidvalidity(&pool, "comp_lang.rust")
+            .await
+            .unwrap();
+        get_or_create_uidvalidity(&pool, "compXlang.rust")
+            .await
+            .unwrap();
+
+        // Reference "News/comp_lang" should only match "comp_lang.*", NOT "compXlang.*".
+        let reference = Mailbox::try_from("News/comp_lang".to_owned()).unwrap_or(Mailbox::Inbox);
+        let data = handle_list(&pool, &reference, "*").await;
+        let names: Vec<String> = data
+            .iter()
+            .filter_map(|d| {
+                if let Data::List { mailbox, .. } = d {
+                    match mailbox {
+                        Mailbox::Other(other) => {
+                            Some(String::from_utf8_lossy(other.inner().as_ref()).into_owned())
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            names.iter().all(|n| n.starts_with("News/comp_lang")),
+            "LIST with '_' reference must not match 'compXlang': {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("compXlang")),
+            "underscore must be escaped: compXlang must not appear; got: {names:?}"
+        );
     }
 
     // ── NAMESPACE (RFC 2342) tests ────────────────────────────────────────────
