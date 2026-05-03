@@ -132,10 +132,12 @@ impl IpfsStore for RadosStore {
                 }
                 Err(e) => return Err(IpfsError::ReadFailed(e.to_string())),
             };
-            let mut buf = Vec::with_capacity(size as usize);
+            let mut buf = vec![0u8; size as usize];
             // Handle TOCTOU: object may be deleted between stat and read.
+            // Truncate to the actual bytes returned — if the object shrinks
+            // between stat and read, rados_object_read returns fewer bytes.
             match ioctx.rados_object_read(&obj_name, &mut buf, 0) {
-                Ok(_) => {}
+                Ok(n) => buf.truncate(n),
                 Err(ceph::error::RadosError::ApiError(nix::errno::Errno::ENOENT)) => {
                     return Ok(None)
                 }

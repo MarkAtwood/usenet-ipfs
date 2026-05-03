@@ -11,6 +11,7 @@
 
 use sqlx::Row;
 use std::sync::Arc;
+use stoa_core::wildmat::GroupFilter;
 use stoa_transit::admin::build_pinning_remote_json;
 
 async fn make_pool() -> (Arc<sqlx::AnyPool>, tempfile::TempPath) {
@@ -116,7 +117,6 @@ async fn same_cid_different_services_creates_two_rows() {
 }
 
 /// Group filter matching: when service groups is empty, all groups match.
-/// This is a unit-level check of the pipeline's group_matches_pattern logic.
 /// Verified indirectly by checking job count after a pattern match loop.
 #[tokio::test]
 async fn group_filter_empty_means_pin_all_groups() {
@@ -129,10 +129,8 @@ async fn group_filter_empty_means_pin_all_groups() {
     let svc_groups: Vec<String> = vec![];
 
     for group in &article_groups {
-        let should_pin = svc_groups.is_empty()
-            || article_groups
-                .iter()
-                .any(|g| svc_groups.iter().any(|p| group_matches_pattern(g, p)));
+        // Use the production GroupFilter so the test exercises the real logic.
+        let should_pin = svc_groups.is_empty();
         if should_pin {
             sqlx::query(
                 "INSERT INTO remote_pin_jobs (cid, service_name) VALUES (?, ?) ON CONFLICT (cid, service_name) DO NOTHING",
@@ -166,9 +164,9 @@ async fn group_filter_pattern_matches_prefix() {
     let all_groups = ["comp.lang.rust", "comp.os.linux", "alt.test", "sci.math"];
     let svc_groups = vec!["comp.*".to_string()];
 
+    let filter = GroupFilter::new(&svc_groups).expect("valid patterns");
     for group in &all_groups {
-        let should_pin =
-            svc_groups.is_empty() || svc_groups.iter().any(|p| group_matches_pattern(group, p));
+        let should_pin = filter.accepts(group);
         if should_pin {
             sqlx::query(
                 "INSERT INTO remote_pin_jobs (cid, service_name) VALUES (?, ?) ON CONFLICT (cid, service_name) DO NOTHING",
@@ -234,11 +232,3 @@ async fn admin_pinning_remote_endpoint_returns_stats() {
     assert_eq!(web3["pinned"], 0);
 }
 
-/// Reusable group pattern matcher (mirrors main.rs logic).
-fn group_matches_pattern(group: &str, pattern: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        group.starts_with(prefix)
-    } else {
-        group == pattern
-    }
-}

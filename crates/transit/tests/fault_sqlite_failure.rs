@@ -231,9 +231,17 @@ async fn log_storage_failure_is_non_fatal() {
 }
 
 /// After a log-storage failure, the IPFS write and msgid_map insert have
-/// already succeeded. The article CID is therefore recorded in the map,
-/// documenting the partial-commit characteristic of the current pipeline
-/// (no two-phase commit between IPFS write and log append).
+/// already succeeded.  The article CID is therefore recorded in the map.
+///
+/// **Known deficiency**: this is NOT intended behaviour — it is a partial-commit
+/// caused by the absence of two-phase commit or compensating rollback between
+/// the IPFS write and the log append.  The article ends up in IPFS and in the
+/// msgid_map but is invisible to readers (not in the group log), and cannot be
+/// re-ingested (msgid_map already has the CID).
+///
+/// This test documents the current (broken) behaviour to detect regressions
+/// and to pin the contract until a proper fix (e.g. a write-ahead log or
+/// compensating delete on log-append failure) is implemented.
 ///
 /// Independent oracle: the pipeline executes IPFS write → msgid_map insert →
 /// log append in sequence; errors in the log append step do not roll back the
