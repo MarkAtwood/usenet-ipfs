@@ -62,8 +62,6 @@ pub async fn run_suck_pull(
 ) -> Result<SuckPullSummary, StorageError> {
     let start = Instant::now();
 
-    ensure_cursor_table(pool).await?;
-
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -253,19 +251,6 @@ pub async fn run_suck_pull(
 }
 
 // ── Cursor helpers ─────────────────────────────────────────────────────────────
-
-async fn ensure_cursor_table(pool: &AnyPool) -> Result<(), StorageError> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS suck_pull_cursor (\
-            group_name TEXT PRIMARY KEY NOT NULL,\
-            last_fetched_unix INTEGER NOT NULL\
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| StorageError::Database(e.to_string()))?;
-    Ok(())
-}
 
 async fn read_cursor(pool: &AnyPool, group: &str) -> Result<Option<u64>, StorageError> {
     let row: Option<(i64,)> =

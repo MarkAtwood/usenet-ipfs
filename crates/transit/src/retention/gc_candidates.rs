@@ -53,18 +53,7 @@ pub async fn select_gc_candidates(
 ) -> Result<Vec<GcArticleRecord>, StorageError> {
     let cutoff_ms = now_ms.saturating_sub(grace_period_ms) as i64;
 
-    // Ensure the pinned_cids table exists so the NOT IN subquery never fails
-    // on a database that has never had a pin operation.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS pinned_cids (\
-            cid TEXT PRIMARY KEY NOT NULL, \
-            pinned_at_ms INTEGER NOT NULL\
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| StorageError::Database(e.to_string()))?;
-
+    // pinned_cids is created by the migration; no DDL here.
     let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
         "SELECT cid, group_name, ingested_at_ms, byte_count
          FROM articles
@@ -208,15 +197,6 @@ mod tests {
 
     async fn insert_pinned_cid(pool: &AnyPool, cid: &Cid) {
         let cid_str = cid.to_string();
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS pinned_cids (\
-                cid TEXT PRIMARY KEY NOT NULL, \
-                pinned_at_ms INTEGER NOT NULL\
-            )",
-        )
-        .execute(pool)
-        .await
-        .expect("create pinned_cids");
         sqlx::query("INSERT INTO pinned_cids (cid, pinned_at_ms) VALUES (?, 0)")
             .bind(cid_str)
             .execute(pool)

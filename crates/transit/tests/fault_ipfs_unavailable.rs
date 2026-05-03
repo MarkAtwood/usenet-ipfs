@@ -21,7 +21,7 @@ use stoa_core::{
 };
 use stoa_transit::peering::{
     ingestion::{ihave_response, IngestResult},
-    pipeline::{run_pipeline, IpfsError, IpfsStore, MemIpfsStore, PipelineCtx},
+    pipeline::{run_pipeline, IpfsError, IpfsStore, MemIpfsStore, PipelineCtx, PipelineError},
 };
 
 // ── FailingIpfsStore ──────────────────────────────────────────────────────────
@@ -166,8 +166,8 @@ async fn ipfs_unavailable_returns_error() {
     );
     let err = result.unwrap_err();
     assert!(
-        err.contains("IPFS"),
-        "error message must mention IPFS so callers can identify the cause: {err}"
+        matches!(err, PipelineError::Transient(_)),
+        "IPFS write failure must be a transient (not permanent) error: {err}"
     );
 }
 

@@ -3,13 +3,31 @@
 //! After an article passes `check_ingest`, `run_pipeline` writes it to IPFS,
 //! records the Message-ID → CID mapping, and appends to each group log.
 
-/// Error-string prefix emitted when an article is missing its Message-ID header.
-/// Used by `main::classify_pipeline_error` to distinguish permanent failures.
-pub const ERR_MISSING_MESSAGE_ID: &str = "missing Message-ID header";
+/// Typed error returned by [`run_pipeline`].
+///
+/// The variant encodes whether the failure is permanent (article is defective;
+/// do not retry) or transient (infrastructure error; may succeed on retry).
+/// Callers must match on the variant — never on the inner message string.
+#[derive(Debug)]
+pub enum PipelineError {
+    /// Permanent failure: the article is defective and retrying cannot help
+    /// (e.g. missing `Message-ID`, signature self-check failure).
+    Permanent(String),
+    /// Transient failure: infrastructure is unavailable; may succeed on retry
+    /// (e.g. IPFS write failed, database error).
+    Transient(String),
+}
 
-/// Error-string prefix emitted when a group-log signature self-check fails.
-/// Used by `main::classify_pipeline_error` to distinguish permanent failures.
-pub const ERR_SIGNATURE_SELF_CHECK_FAILED: &str = "log entry signature self-check failed";
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineError::Permanent(m) => write!(f, "permanent: {m}"),
+            PipelineError::Transient(m) => write!(f, "transient: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}
 
 use super::lmdb_store::LmdbStore;
 use async_trait::async_trait;
@@ -495,7 +513,7 @@ pub async fn run_pipeline<I, S>(
     log_storage: &S,
     pool: &AnyPool,
     ctx: PipelineCtx<'_>,
-) -> Result<(PipelineResult, PipelineMetrics), String>
+) -> Result<(PipelineResult, PipelineMetrics), PipelineError>
 where
     I: IpfsStore + ?Sized,
     S: LogStorage,
@@ -522,7 +540,7 @@ where
     let cid = ipfs
         .put_raw(article_bytes)
         .await
-        .map_err(|e| format!("IPFS write failed: {e}"))?;
+        .map_err(|e| PipelineError::Transient(format!("IPFS write failed: {e}")))?;
     let elapsed = t0.elapsed();
     crate::metrics::IPFS_WRITE_LATENCY_SECONDS.observe(elapsed.as_secs_f64());
     let ipfs_write_latency_ms = elapsed.as_millis() as u64;
@@ -553,7 +571,7 @@ where
 
     // 2+3. Parse Message-ID and Newsgroups in a single header scan.
     let (message_id, group_name_strs) = parse_message_id_and_newsgroups(article_bytes)
-        .ok_or_else(|| ERR_MISSING_MESSAGE_ID.to_string())?;
+        .ok_or_else(|| PipelineError::Permanent("missing Message-ID header".to_string()))?;
     match msgid_map.insert(&message_id, &cid).await {
         Ok(()) => {}
         Err(e) => {
@@ -579,7 +597,7 @@ where
                     );
                 }
             }
-            return Err(format!("msgid insert failed: {e}"));
+            return Err(PipelineError::Transient(format!("msgid insert failed: {e}")));
         }
     }
 
@@ -641,9 +659,9 @@ where
                 crate::metrics::ARTICLES_REJECTED_GROUP_TOTAL
                     .with_label_values(&[group_name_str.as_str(), "signature_error"])
                     .inc();
-                return Err(format!(
-                    "{ERR_SIGNATURE_SELF_CHECK_FAILED} for {group_name_str}: {e}"
-                ));
+                return Err(PipelineError::Permanent(format!(
+                    "log entry signature self-check failed for {group_name_str}: {e}"
+                )));
             }
         };
         match crdt_append(log_storage, &group, verified).await {
@@ -705,7 +723,7 @@ where
         .bind(byte_count)
         .execute(pool)
         .await
-        .map_err(|e| format!("articles table insert failed for CID {cid_str}: {e}"))?;
+        .map_err(|e| PipelineError::Transient(format!("articles table insert failed for CID {cid_str}: {e}")))?;
     }
 
     let group_names: Vec<String> = appended_groups.into_iter().map(|(name, _)| name).collect();
@@ -1051,7 +1069,10 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "missing Message-ID must return Err");
-        assert!(result.unwrap_err().contains("Message-ID"));
+        assert!(
+            matches!(result.unwrap_err(), PipelineError::Permanent(_)),
+            "missing Message-ID must be a permanent (not transient) failure"
+        );
     }
 
     #[tokio::test]

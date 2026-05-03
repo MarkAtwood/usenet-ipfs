@@ -24,10 +24,7 @@ use stoa_transit::{
         backpressure::IpfsLatencyMonitor,
         blacklist::BlacklistConfig,
         ingestion_queue::ingestion_queue,
-        pipeline::{
-            run_pipeline, IpfsStore, PipelineCtx, ERR_MISSING_MESSAGE_ID,
-            ERR_SIGNATURE_SELF_CHECK_FAILED,
-        },
+        pipeline::{run_pipeline, IpfsStore, PipelineCtx, PipelineError},
         rate_limit::{ExhaustionAction, PeerRateLimiter},
         session::{run_peering_session, PeeringShared},
     },
@@ -409,21 +406,6 @@ enum PipelineOutcome {
     TransientFailure,
 }
 
-/// Classify a `run_pipeline` error string into permanent vs transient.
-///
-/// The error strings are defined in `peering/pipeline.rs`; they are stable
-/// internal constants, not user-visible messages.
-fn classify_pipeline_error(msg: &str) -> PipelineOutcome {
-    // Permanent: article-level defects that cannot be fixed by retrying.
-    // The constants are defined in peering/pipeline.rs; matching here will
-    // break at compile time if the strings ever change.
-    if msg.contains(ERR_MISSING_MESSAGE_ID) || msg.contains(ERR_SIGNATURE_SELF_CHECK_FAILED) {
-        return PipelineOutcome::PermanentFailure;
-    }
-    // Everything else (IPFS write failed, msgid insert failed, articles table
-    // insert failed, DB contention) is treated as transient.
-    PipelineOutcome::TransientFailure
-}
 
 /// Run `run_pipeline`, emit structured telemetry, and drive post-success hooks
 /// (IPNS publish + remote pin enqueue).  Common to the ingestion drain and the
@@ -475,9 +457,13 @@ async fn run_pipeline_and_notify(
             enqueue_pin_jobs(&result, args.pin_service_filters, args.transit_pool).await;
             PipelineOutcome::Success
         }
-        Err(e) => {
-            warn!(msgid = %message_id, "pipeline failed: {e}");
-            classify_pipeline_error(&e)
+        Err(PipelineError::Permanent(msg)) => {
+            warn!(msgid = %message_id, "pipeline permanent failure: {msg}");
+            PipelineOutcome::PermanentFailure
+        }
+        Err(PipelineError::Transient(msg)) => {
+            warn!(msgid = %message_id, "pipeline transient failure: {msg}");
+            PipelineOutcome::TransientFailure
         }
     }
 }
