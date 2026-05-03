@@ -54,12 +54,19 @@ thread_local! {
 // Evaluation context
 // ---------------------------------------------------------------------------
 
+/// Maximum nesting depth enforced at eval time.
+///
+/// Must match `MAX_VALIDATE_DEPTH` in `lib.rs`.  Kept here as an independent
+/// constant so the evaluator does not depend on the compile-time validator;
+/// the two values must be kept in sync.
+const MAX_EVAL_DEPTH: usize = 32;
+
 pub struct Ctx<'a> {
-    pub headers: Vec<(String, String)>,
-    pub message_size: usize,
-    pub envelope_from: &'a str,
-    pub envelope_to: &'a str,
-    pub variables: HashMap<String, String>,
+    headers: Vec<(String, String)>,
+    message_size: usize,
+    envelope_from: &'a str,
+    envelope_to: &'a str,
+    variables: HashMap<String, String>,
     /// Whether `require ["variables"]` was declared (RFC 5229 §3).
     ///
     /// `${varname}` substitution is only active when this is `true`.  The flag
@@ -67,13 +74,19 @@ pub struct Ctx<'a> {
     /// for a `require` statement that includes `"variables"`.  Variable names
     /// are case-insensitive; storage uses lowercased keys throughout (see
     /// `expand_vars`).
-    pub variables_enabled: bool,
+    variables_enabled: bool,
     /// The last explicit disposition action taken before a `stop` (RFC 5228 §4.1).
     ///
     /// RFC 5228 §4.1: `stop` halts script execution; any actions already taken
     /// remain in effect.  When `stop` is encountered, `eval_script` returns
     /// `last_action` if one was recorded, or implicit Keep otherwise.
-    pub last_action: Option<SieveAction>,
+    last_action: Option<SieveAction>,
+    /// Current `if`/`elsif` nesting depth.
+    ///
+    /// Incremented on entry to `eval_if`; decremented on exit.  Capped at
+    /// `MAX_EVAL_DEPTH` as a defensive guard against scripts that bypassed
+    /// the compile-time depth check.
+    nesting_depth: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +141,7 @@ pub fn eval_script(
         variables: HashMap::new(),
         variables_enabled,
         last_action: None,
+        nesting_depth: 0,
     };
 
     let mut actions: Vec<SieveAction> = Vec::new();
@@ -241,26 +255,47 @@ fn eval_stmt(stmt: &Stmt, ctx: &mut Ctx<'_>) -> StmtResult {
 /// `rest` is the slice of forms *after* the leading `Word("if")`:
 /// `[test_form0, test_form1, ..., Block(then_stmts), optional elsif/else ...]`
 fn eval_if(rest: &[Form], ctx: &mut Ctx<'_>) -> StmtResult {
+    if ctx.nesting_depth >= MAX_EVAL_DEPTH {
+        // Should not happen for scripts that passed compile-time validation,
+        // but guard defensively against bypassed checks (e.g. future
+        // deserialization paths or test-only CompiledScript construction).
+        warn!(
+            depth = ctx.nesting_depth,
+            "sieve: if-chain nesting depth exceeded MAX_EVAL_DEPTH; treating as no-op"
+        );
+        return StmtResult::Continue;
+    }
+    ctx.nesting_depth += 1;
+
     let block_pos = match rest.iter().position(|f| matches!(f, Form::Block(_))) {
         Some(p) => p,
-        None => return StmtResult::Continue, // malformed
+        None => {
+            ctx.nesting_depth -= 1;
+            return StmtResult::Continue; // malformed
+        }
     };
 
     let test_forms = &rest[..block_pos];
     let block = match &rest[block_pos] {
         Form::Block(stmts) => stmts,
-        _ => return StmtResult::Continue,
+        _ => {
+            ctx.nesting_depth -= 1;
+            return StmtResult::Continue;
+        }
     };
     let after_block = &rest[block_pos + 1..];
 
-    if eval_test(test_forms, ctx) {
-        return match eval_stmt_list(block, ctx) {
+    let result = if eval_test(test_forms, ctx) {
+        match eval_stmt_list(block, ctx) {
             None | Some(StmtResult::Continue) => StmtResult::Continue,
             Some(other) => other,
-        };
-    }
+        }
+    } else {
+        eval_elsif_else(after_block, ctx)
+    };
 
-    eval_elsif_else(after_block, ctx)
+    ctx.nesting_depth -= 1;
+    result
 }
 
 fn eval_elsif_else(rest: &[Form], ctx: &mut Ctx<'_>) -> StmtResult {
