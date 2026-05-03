@@ -237,14 +237,37 @@ impl BlockCache {
             return Ok(());
         }
 
-        // Fetch LRU candidates in a single query.  We scan in last_access
-        // order and stop accumulating once both constraints are satisfied.
-        // The result set is bounded by the cache entry limit.
+        // Compute an upper bound on how many rows we need to fetch.
+        // Over-fetching wastes memory; under-fetching means the cache
+        // exceeds limits until the next eviction cycle (acceptable — limits
+        // are soft).  We estimate based on:
+        //   - entries needed to satisfy the count constraint
+        //   - entries needed to free enough bytes (using average entry size)
+        // A 2× safety factor covers size skew without loading the whole table.
+        let entries_excess = (count + 1).saturating_sub(self.config.max_entries);
+        let bytes_to_free = (total_bytes + incoming_bytes).saturating_sub(self.config.max_bytes);
+        let avg_entry_bytes = if count > 0 {
+            total_bytes.div_ceil(count)
+        } else {
+            1
+        };
+        let entries_for_bytes = bytes_to_free.div_ceil(avg_entry_bytes.max(1));
+        // Fetch at most `count` rows; never zero to avoid a no-op LIMIT.
+        let limit = (entries_excess + entries_for_bytes)
+            .saturating_mul(2)
+            .max(1)
+            .min(count) as i64;
+
+        // Fetch the LRU candidates we need.  We stop accumulating once both
+        // constraints are satisfied; the Rust loop breaks early so the LIMIT
+        // is mostly a memory-safety guard, not an eviction-correctness knob.
         let candidates: Vec<(String, String, i64)> = sqlx::query_as(
             "SELECT cid, file_path, byte_size \
              FROM transit_block_cache \
-             ORDER BY last_access ASC",
+             ORDER BY last_access ASC \
+             LIMIT ?",
         )
+        .bind(limit)
         .fetch_all(&*self.pool)
         .await?;
 

@@ -26,14 +26,11 @@ impl Default for BlacklistConfig {
     }
 }
 
-/// Check a peer's consecutive_failures and blacklist if threshold is exceeded.
+/// Check a peer's `consecutive_failures` and blacklist it if the threshold is exceeded.
 ///
-/// Atomically increments `consecutive_failures` for the peer and, if the new
-/// count reaches `config.failure_threshold`, sets
-/// `blacklisted_until = now_ms + config.duration_secs * 1000` in the DB.
-///
-/// Uses a single `UPDATE … RETURNING` statement to eliminate the SELECT/UPDATE
-/// race window that existed when the two operations were separate queries.
+/// Does NOT increment `consecutive_failures`; the caller (`record_rejected`)
+/// is responsible for incrementing.  Callers that do both will double-count
+/// failures and halve the effective blacklist threshold.
 ///
 /// Returns `true` if the peer was newly blacklisted, `false` otherwise.
 /// Returns `Ok(false)` if the peer is not found in the `peers` table.
@@ -44,13 +41,10 @@ pub async fn check_and_blacklist(
     now_ms: i64,
     config: &BlacklistConfig,
 ) -> Result<bool, StorageError> {
-    // Atomically increment the counter and fetch the new value in one round-trip.
-    // If the peer row does not exist, fetch_optional returns None and we bail out.
+    // Read the current failure count without modifying it — the caller has
+    // already incremented via record_rejected.
     let row: Option<(i64,)> = sqlx::query_as(
-        "UPDATE peers \
-         SET consecutive_failures = consecutive_failures + 1 \
-         WHERE peer_id = ? \
-         RETURNING consecutive_failures",
+        "SELECT consecutive_failures FROM peers WHERE peer_id = ?",
     )
     .bind(peer_id)
     .fetch_optional(pool)
