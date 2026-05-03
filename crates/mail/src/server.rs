@@ -1756,6 +1756,43 @@ mod tests {
         (state, ipfs, tmps)
     }
 
+    /// Like `jmap_state()` but with a single test user configured so that
+    /// routes protected by `basic_auth_middleware` can be exercised.
+    async fn jmap_auth_state(
+        username: &str,
+        password: &str,
+    ) -> (Arc<AppState>, Arc<MemIpfsStore>, Vec<tempfile::TempPath>) {
+        let (state, ipfs, tmps) = jmap_state().await;
+        let hash = bcrypt::hash(password, 4).expect("bcrypt::hash must not fail");
+        let users = vec![UserCredential {
+            username: username.to_string(),
+            password: hash,
+        }];
+        let patched = Arc::new(AppState {
+            credential_store: Arc::new(
+                CredentialStore::from_credentials(&users)
+                    .expect("test setup: valid bcrypt hashes"),
+            ),
+            auth_config: Arc::new(AuthConfig {
+                required: true,
+                users,
+                ..Default::default()
+            }),
+            // Clone all other fields unchanged.
+            start_time: state.start_time,
+            jmap: state.jmap.clone(),
+            token_store: state.token_store.clone(),
+            oidc_store: state.oidc_store.clone(),
+            base_url: state.base_url.clone(),
+            cors: state.cors.clone(),
+            slow_jmap_threshold_ms: state.slow_jmap_threshold_ms,
+            activitypub_config: state.activitypub_config.clone(),
+            activitypub: state.activitypub.clone(),
+            mta_sts_domains: state.mta_sts_domains.clone(),
+        });
+        (patched, ipfs, tmps)
+    }
+
     async fn spawn_server(state: Arc<AppState>) -> std::net::SocketAddr {
         let app = build_router(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1914,12 +1951,13 @@ mod tests {
 
     #[tokio::test]
     async fn blob_download_invalid_cid_returns_400() {
-        let addr = spawn_server(dev_state().await.0).await;
+        let addr = spawn_server(auth_state("alice", "pass").await.0).await;
 
         let resp = reqwest::Client::new()
             .get(format!(
-                "http://{addr}/jmap/download/acc1/not-a-cid/file.txt"
+                "http://{addr}/jmap/download/u_alice/not-a-cid/file.txt"
             ))
+            .basic_auth("alice", Some("pass"))
             .send()
             .await
             .expect("request must succeed");
@@ -1996,7 +2034,7 @@ mod tests {
     /// 200 with Content-Type: message/rfc822 and base64-encoded body.
     #[tokio::test]
     async fn blob_download_with_ipfs_returns_200_with_rfc822() {
-        let (state, ipfs, _tmps) = jmap_state().await;
+        let (state, ipfs, _tmps) = jmap_auth_state("alice", "pass").await;
 
         // Seed a known block.
         let block_data = b"hello from IPFS block";
@@ -2008,7 +2046,8 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/jmap/download/acc1/{cid}/block.bin"))
+            .get(format!("http://{addr}/jmap/download/u_alice/{cid}/block.bin"))
+            .basic_auth("alice", Some("pass"))
             .send()
             .await
             .expect("request must succeed");
@@ -2042,7 +2081,7 @@ mod tests {
     /// A CID not present in IPFS must return 404.
     #[tokio::test]
     async fn blob_download_unknown_cid_returns_404() {
-        let (state, _ipfs, _tmps) = jmap_state().await;
+        let (state, _ipfs, _tmps) = jmap_auth_state("alice", "pass").await;
         let addr = spawn_server(state).await;
 
         // Valid CID that was never seeded.
@@ -2050,8 +2089,9 @@ mod tests {
 
         let resp = reqwest::Client::new()
             .get(format!(
-                "http://{addr}/jmap/download/acc1/{absent_cid}/missing.bin"
+                "http://{addr}/jmap/download/u_alice/{absent_cid}/missing.bin"
             ))
+            .basic_auth("alice", Some("pass"))
             .send()
             .await
             .expect("request must succeed");
