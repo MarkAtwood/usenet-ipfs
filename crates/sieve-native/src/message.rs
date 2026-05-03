@@ -27,8 +27,12 @@ pub fn extract_headers(raw: &[u8]) -> Vec<(String, String)> {
         // Continuation line: starts with whitespace.
         if line.starts_with(' ') || line.starts_with('\t') {
             if let Some(last) = headers.last_mut() {
-                last.1.push(' ');
-                last.1.push_str(line.trim());
+                // RFC 5322 §2.2.3: unfolding removes only the CRLF; the
+                // folding whitespace on the continuation line remains part of
+                // the value.  Append the continuation line as-is (after CRLF
+                // stripping) so that the leading WSP is preserved and no extra
+                // normalisation is applied.
+                last.1.push_str(line);
             }
             continue;
         }
@@ -84,10 +88,21 @@ pub fn address_part(addr: &str, part: &str) -> String {
 /// stripping any display name and angle brackets.
 fn bare_address(addr: &str) -> String {
     let addr = addr.trim();
-    // If there is a `<...>` section, use what is inside it.
-    if let Some(start) = addr.rfind('<') {
-        if let Some(end) = addr[start..].find('>') {
-            return addr[start + 1..start + end].trim().to_string();
+    // Search backwards for the rightmost `<...>` pair whose content contains
+    // `@`.  This handles angle brackets in display names or trailing comments
+    // (e.g. `user@host <not-an-addr>`) that do not enclose an email address.
+    let mut rest = addr;
+    while let Some(close) = rest.rfind('>') {
+        let prefix = &rest[..close];
+        if let Some(open) = prefix.rfind('<') {
+            let inner = &rest[open + 1..close];
+            if inner.contains('@') {
+                return inner.trim().to_string();
+            }
+            // No '@' in this pair — keep searching to the left.
+            rest = &rest[..open];
+        } else {
+            break;
         }
     }
     addr.to_string()

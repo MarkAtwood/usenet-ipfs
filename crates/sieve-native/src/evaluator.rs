@@ -719,20 +719,36 @@ fn eval_address_test(forms: &[Form], ctx: &mut Ctx<'_>) -> bool {
     let casemap = cmp == Comparator::AsciiCasemap;
     let (part, after_part) = extract_address_part(&after_cmp);
     let (field_names, keys) = collect_two_string_lists(&after_part);
+    let variables_enabled = ctx.variables_enabled;
 
-    for (hdr_name, hdr_value) in &ctx.headers {
+    // Collect captures into a local map first so the immutable borrow of
+    // ctx.headers and the mutable borrow of ctx.variables do not overlap.
+    let mut pending_captures: Option<HashMap<String, String>> = None;
+    'search: for (hdr_name, hdr_value) in &ctx.headers {
         for fname in &field_names {
             if hdr_name.eq_ignore_ascii_case(fname) {
                 let addr = message::address_part(hdr_value, part);
                 for key in &keys {
-                    if apply_match(&addr, key, mt, casemap) {
+                    if mt == MatchType::Matches && variables_enabled {
+                        let mut captures: HashMap<String, String> = HashMap::new();
+                        if str_matches_glob_captures(&addr, key, casemap, Some(&mut captures)) {
+                            pending_captures = Some(captures);
+                            break 'search;
+                        }
+                    } else if apply_match(&addr, key, mt, casemap) {
                         return true;
                     }
                 }
             }
         }
     }
-    false
+
+    if let Some(captures) = pending_captures {
+        ctx.variables.extend(captures);
+        true
+    } else {
+        false
+    }
 }
 
 fn eval_envelope_test(forms: &[Form], ctx: &mut Ctx<'_>) -> bool {
@@ -742,21 +758,38 @@ fn eval_envelope_test(forms: &[Form], ctx: &mut Ctx<'_>) -> bool {
     let casemap = cmp == Comparator::AsciiCasemap;
     let (part, after_part) = extract_address_part(&after_cmp);
     let (part_names, keys) = collect_two_string_lists(&after_part);
+    let variables_enabled = ctx.variables_enabled;
+    // Snapshot before mutably borrowing ctx.variables for capture storage.
+    let envelope_from = ctx.envelope_from;
+    let envelope_to = ctx.envelope_to;
 
-    for pname in &part_names {
+    let mut pending_captures: Option<HashMap<String, String>> = None;
+    'search: for pname in &part_names {
         let raw_addr = match pname.to_ascii_lowercase().as_str() {
-            "from" => ctx.envelope_from,
-            "to" => ctx.envelope_to,
+            "from" => envelope_from,
+            "to" => envelope_to,
             _ => continue,
         };
         let addr = message::address_part(raw_addr, part);
         for key in &keys {
-            if apply_match(&addr, key, mt, casemap) {
+            if mt == MatchType::Matches && variables_enabled {
+                let mut captures: HashMap<String, String> = HashMap::new();
+                if str_matches_glob_captures(&addr, key, casemap, Some(&mut captures)) {
+                    pending_captures = Some(captures);
+                    break 'search;
+                }
+            } else if apply_match(&addr, key, mt, casemap) {
                 return true;
             }
         }
     }
-    false
+
+    if let Some(captures) = pending_captures {
+        ctx.variables.extend(captures);
+        true
+    } else {
+        false
+    }
 }
 
 fn eval_exists_test(forms: &[Form], ctx: &Ctx<'_>) -> bool {
