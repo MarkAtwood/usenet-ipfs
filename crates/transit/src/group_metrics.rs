@@ -51,8 +51,10 @@ pub async fn run_group_metrics_sampler(pool: Arc<AnyPool>, interval: Duration) {
 /// Returns the set of group names seen in this tick; the caller should pass
 /// that back in as `prev_groups` on the next tick.
 ///
-/// Returns `Err` only on a database error; the high-cardinality guard returns
-/// `Ok(HashSet::new())` so the caller does not update `prev_groups`.
+/// Returns `Err` only on a database error.  The high-cardinality guard
+/// cleans up stale labels and returns `Ok(HashSet::new())`; the caller
+/// should update `prev_groups` to that empty set so the stale-label
+/// removal loop is a no-op on subsequent high-cardinality ticks.
 pub async fn sample_group_metrics(
     pool: &AnyPool,
     prev_groups: &HashSet<String>,
@@ -79,8 +81,17 @@ pub async fn sample_group_metrics(
             limit = HIGH_CARDINALITY_LIMIT,
             "per-group metrics suppressed: active group count exceeds limit"
         );
-        // Return empty set: we did not set any gauges, so we cannot know which
-        // are stale.  The caller should not update prev_groups.
+        // Remove stale labels from the previous tick before returning.  Without
+        // this, any group that was labelled before cardinality spiked would be
+        // retained in Prometheus indefinitely (the normal stale-label removal
+        // below only runs when cardinality is within the limit).
+        for gone in prev_groups.iter() {
+            let _ = crate::metrics::GROUP_LOG_ENTRIES_TOTAL.remove_label_values(&[gone]);
+            let _ = crate::metrics::GROUP_STORAGE_BYTES.remove_label_values(&[gone]);
+            let _ = crate::metrics::GROUP_LAST_ACTIVITY_TIMESTAMP.remove_label_values(&[gone]);
+        }
+        // Return empty set; the caller updates prev_groups to empty so the
+        // stale-label loop above is a no-op on subsequent high-cardinality ticks.
         return Ok(HashSet::new());
     }
 

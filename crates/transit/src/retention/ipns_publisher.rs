@@ -82,6 +82,10 @@ impl IpnsPublisher {
             let now_ms = now_ms();
             if now_ms.saturating_sub(self.last_publish_ms) >= self.republish_interval_ms {
                 if self.can_publish().await {
+                    // ORDERING: release_lock MUST be called after every successful
+                    // can_publish() to avoid advisory lock accumulation.
+                    // update_and_publish is designed to be panic-free (all error
+                    // paths return rather than panic), so the lock is always released.
                     self.update_and_publish().await;
                     self.release_lock().await;
                     self.last_publish_ms = now_ms;
@@ -177,7 +181,9 @@ pub fn build_index_json(groups: &BTreeMap<String, Cid>) -> Vec<u8> {
         // produce valid JSON rather than a corrupt byte sequence.
         // For well-formed newsgroup names this produces identical output to
         // the naive push_str approach.
-        let key = serde_json::to_string(group.as_str()).expect("str always serializes");
+        // serde_json::to_string on a &str cannot fail; use unwrap_or_default as
+        // a belt-and-suspenders guard so this function is unconditionally panic-free.
+        let key = serde_json::to_string(group.as_str()).unwrap_or_default();
         out.push_str(&key);
         out.push_str(r#":""#);
         out.push_str(&cid.to_string());
