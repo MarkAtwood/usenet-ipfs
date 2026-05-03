@@ -403,9 +403,8 @@ async fn fetch_public_key(
     // a different domain than the keyId URL indicates cross-domain key
     // substitution and must be rejected.
     if let Some(doc_id) = actor["id"].as_str() {
-        validate_keyid_domain(key_id, doc_id).map_err(|e| {
-            format!("fetched actor document id domain mismatch: {e}")
-        })?;
+        validate_keyid_domain(key_id, doc_id)
+            .map_err(|e| format!("fetched actor document id domain mismatch: {e}"))?;
     } else {
         return Err("fetched actor document has no 'id' field".to_string());
     }
@@ -453,8 +452,8 @@ fn enforce_minimum_signed_headers(signed_headers_spec: &str, method: &str) -> Re
 /// If the derived `actor_url` (the part before `#`) resolves to a different
 /// host than `key_id`, someone is attempting cross-domain key substitution.
 pub fn validate_keyid_domain(key_id: &str, actor_url: &str) -> Result<(), String> {
-    let key_host = extract_host(key_id)
-        .ok_or_else(|| format!("keyId has no parseable host: {key_id}"))?;
+    let key_host =
+        extract_host(key_id).ok_or_else(|| format!("keyId has no parseable host: {key_id}"))?;
     let actor_host = extract_host(actor_url)
         .ok_or_else(|| format!("actor_url has no parseable host: {actor_url}"))?;
     if key_host != actor_host {
@@ -516,9 +515,7 @@ fn build_signed_string(
                 let provided = headers
                     .get("digest")
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| {
-                        "Digest header required by Signature but absent".to_string()
-                    })?;
+                    .ok_or_else(|| "Digest header required by Signature but absent".to_string())?;
                 if provided != computed {
                     return Err(format!(
                         "Digest mismatch: provided={provided}, computed={computed}"
@@ -779,9 +776,7 @@ mod tests {
 
     #[test]
     fn enforce_min_headers_ok() {
-        assert!(
-            enforce_minimum_signed_headers("(request-target) host date", "GET").is_ok()
-        );
+        assert!(enforce_minimum_signed_headers("(request-target) host date", "GET").is_ok());
     }
 
     #[test]
@@ -796,19 +791,24 @@ mod tests {
     #[test]
     fn enforce_min_headers_missing_host() {
         let err = enforce_minimum_signed_headers("(request-target) date", "GET").unwrap_err();
-        assert!(err.contains("host"), "error must name the missing component: {err}");
+        assert!(
+            err.contains("host"),
+            "error must name the missing component: {err}"
+        );
     }
 
     #[test]
     fn enforce_min_headers_missing_date() {
         let err = enforce_minimum_signed_headers("(request-target) host", "GET").unwrap_err();
-        assert!(err.contains("date"), "error must name the missing component: {err}");
+        assert!(
+            err.contains("date"),
+            "error must name the missing component: {err}"
+        );
     }
 
     #[test]
     fn enforce_min_headers_post_requires_digest() {
-        let err =
-            enforce_minimum_signed_headers("(request-target) host date", "POST").unwrap_err();
+        let err = enforce_minimum_signed_headers("(request-target) host date", "POST").unwrap_err();
         assert!(
             err.contains("digest"),
             "POST without digest must be rejected: {err}"
@@ -888,11 +888,11 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert("host", HeaderValue::from_static("example.com"));
-        headers.insert("date", HeaderValue::from_static("Mon, 01 Jan 2024 00:00:00 GMT"));
         headers.insert(
-            "digest",
-            HeaderValue::from_str(&digest_val).unwrap(),
+            "date",
+            HeaderValue::from_static("Mon, 01 Jan 2024 00:00:00 GMT"),
         );
+        headers.insert("digest", HeaderValue::from_str(&digest_val).unwrap());
 
         let result = build_signed_string(
             "POST",
@@ -901,7 +901,10 @@ mod tests {
             body,
             "(request-target) host date digest",
         );
-        assert!(result.is_ok(), "correct Digest header must be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "correct Digest header must be accepted: {result:?}"
+        );
         let signed = result.unwrap();
         assert!(signed.contains("digest: SHA-256="));
     }

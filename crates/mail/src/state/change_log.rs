@@ -230,6 +230,10 @@ mod tests {
         );
 
         let (bob_created, _, _) = store.query_since(2, "Email", 0).await.unwrap();
-        assert_eq!(bob_created, vec!["bob_cid"], "bob must not see alice's mail");
+        assert_eq!(
+            bob_created,
+            vec!["bob_cid"],
+            "bob must not see alice's mail"
+        );
     }
 }

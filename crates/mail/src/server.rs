@@ -1,5 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 
+use crate::jmap::backend::StoaBackend;
+use crate::jmap::backend_types::{Email, Mailbox, Thread};
 use axum::{
     extract::{DefaultBodyLimit, Extension, Request, State},
     http::{header, HeaderMap, HeaderName, Method, StatusCode},
@@ -9,7 +11,8 @@ use axum::{
     Json, Router,
 };
 use jmap_server::{
-    check_known_capabilities, request_error, Dispatcher, HandlerFuture, JmapHandler,
+    check_known_capabilities, handle_changes, handle_get, handle_query, request_error, Dispatcher,
+    HandlerFuture, JmapHandler,
 };
 use jmap_types::{JmapError, JmapRequest};
 use serde_json::{json, Value};
@@ -468,16 +471,78 @@ impl JmapHandler<JmapCaller> for StoaHandler {
         let stores = Arc::clone(&self.stores);
         Box::pin(async move {
             let t0 = Instant::now();
-            let result = route_method(
-                &method,
-                args,
-                &stores,
-                &caller.canonical_account_id,
-                caller.process_start,
-                caller.is_operator,
-                caller.user_id,
-            )
-            .await;
+
+            // Build a StoaBackend for the generic jmap-server handlers.
+            let backend = StoaBackend {
+                stores: Arc::clone(&stores),
+                user_id: caller.user_id,
+                canonical_account_id: caller.canonical_account_id.clone(),
+            };
+
+            // The seven read arms are handled by the generic jmap-server handlers
+            // (handle_get / handle_changes / handle_query), which correctly implement
+            // RFC 8620 argument parsing and response shaping.  Write, blob, snippet,
+            // and admin arms still go through route_method.
+            //
+            // The generic handlers require accountId to be present.  Inject the
+            // canonical account ID when the client omits it (null or absent) so
+            // the handlers see a valid accountId without rejecting the call.
+            let args = match method.as_str() {
+                "Mailbox/get" | "Mailbox/changes" | "Mailbox/query" | "Email/get"
+                | "Email/changes" | "Email/query" | "Thread/get" => {
+                    let mut a = args;
+                    if a.get("accountId").and_then(|v| v.as_str()).is_none() {
+                        if let Some(obj) = a.as_object_mut() {
+                            obj.insert(
+                                "accountId".to_string(),
+                                Value::String(caller.canonical_account_id.clone()),
+                            );
+                        }
+                    }
+                    a
+                }
+                _ => args,
+            };
+
+            // Enforce maxObjectsInGet (500) for Email/get before the generic handler
+            // runs.  handle_get does not know stoa's session capability limit.
+            if method == "Email/get" {
+                if let Some(ids) = args.get("ids").and_then(|v| v.as_array()) {
+                    const MAX_IDS: usize = 500;
+                    if ids.len() > MAX_IDS {
+                        let mut err = jmap_types::JmapError::request_too_large();
+                        err.description =
+                            Some(format!("ids exceeds maxObjectsInGet limit of {MAX_IDS}"));
+                        return Err(err);
+                    }
+                }
+            }
+
+            let result: Result<(Value, Vec<jmap_types::Invocation>), jmap_types::JmapError> =
+                match method.as_str() {
+                    "Mailbox/get" => handle_get::<Mailbox, _>(&backend, args).await,
+                    "Mailbox/changes" => handle_changes::<Mailbox, _>(&backend, args).await,
+                    "Mailbox/query" => handle_query::<Mailbox, _>(&backend, args).await,
+                    "Email/get" => handle_get::<Email, _>(&backend, args).await,
+                    "Email/changes" => handle_changes::<Email, _>(&backend, args).await,
+                    "Email/query" => handle_query::<Email, _>(&backend, args).await,
+                    "Thread/get" => handle_get::<Thread, _>(&backend, args).await,
+                    _ => {
+                        // All remaining arms (writes, blobs, snippets, admin, stubs).
+                        let v = route_method(
+                            &method,
+                            args,
+                            &stores,
+                            &caller.canonical_account_id,
+                            caller.process_start,
+                            caller.is_operator,
+                            caller.user_id,
+                        )
+                        .await;
+                        stoa_value_to_result(v)
+                    }
+                };
+
             let elapsed = t0.elapsed().as_secs_f64();
             crate::metrics::JMAP_REQUESTS_TOTAL
                 .with_label_values(&[&method])
@@ -496,11 +561,14 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                 );
             }
             if method == "Email/query" {
-                if let Some(ids) = result.get("ids").and_then(|v| v.as_array()) {
-                    crate::metrics::EMAIL_QUERY_RESULTS.set(ids.len() as i64);
+                if let Ok((ref v, _)) = result {
+                    if let Some(ids) = v.get("ids").and_then(|v| v.as_array()) {
+                        crate::metrics::EMAIL_QUERY_RESULTS.set(ids.len() as i64);
+                    }
                 }
             }
-            stoa_value_to_result(result)
+
+            result
         })
     }
 }
@@ -733,55 +801,6 @@ async fn route_method(
     }
 
     match method {
-        "Mailbox/get" => {
-            let subscribed: std::collections::HashSet<String> = jmap
-                .subscription_store
-                .list_subscribed(user_id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            let groups = match jmap.article_numbers.list_groups().await {
-                Ok(g) => g,
-                Err(e) => return json!({"error": e.to_string()}),
-            };
-            let group_infos: Vec<crate::mailbox::get::GroupInfo> = groups
-                .into_iter()
-                .map(|(name, lo, hi)| {
-                    let total_emails = if hi < lo {
-                        0u32
-                    } else {
-                        (hi - lo + 1).min(u32::MAX as u64) as u32
-                    };
-                    let is_subscribed = subscribed.contains(&name);
-                    crate::mailbox::get::GroupInfo {
-                        name,
-                        total_emails,
-                        unread_emails: 0,
-                        is_subscribed,
-                    }
-                })
-                .collect();
-            let ids_filter: Option<Vec<String>> =
-                args.get("ids").and_then(|v| v.as_array()).map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
-            let state = jmap
-                .state_store
-                .get_state(user_id, "Mailbox")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-            crate::mailbox::get::handle_mailbox_get(
-                &jmap.special_mailboxes,
-                &group_infos,
-                ids_filter.as_deref(),
-                &state,
-                canonical_account_id,
-            )
-        }
-
         "Mailbox/set" => {
             let old_state = jmap
                 .state_store
@@ -818,248 +837,6 @@ async fn route_method(
                 }
             }
             result
-        }
-
-        "Mailbox/query" => {
-            let subscribed: std::collections::HashSet<String> = jmap
-                .subscription_store
-                .list_subscribed(user_id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            let groups = match jmap.article_numbers.list_groups().await {
-                Ok(g) => g,
-                Err(e) => return json!({"error": e.to_string()}),
-            };
-            let group_infos: Vec<crate::mailbox::get::GroupInfo> = groups
-                .into_iter()
-                .map(|(name, lo, hi)| {
-                    let total_emails = if hi < lo {
-                        0u32
-                    } else {
-                        (hi - lo + 1).min(u32::MAX as u64) as u32
-                    };
-                    let is_subscribed = subscribed.contains(&name);
-                    crate::mailbox::get::GroupInfo {
-                        name,
-                        total_emails,
-                        unread_emails: 0,
-                        is_subscribed,
-                    }
-                })
-                .collect();
-            let filter = args.get("filter");
-            let sort = args.get("sort");
-            let state = jmap
-                .state_store
-                .get_state(user_id, "Mailbox")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-            crate::mailbox::query::handle_mailbox_query(
-                &group_infos,
-                filter,
-                sort,
-                &state,
-                canonical_account_id,
-            )
-        }
-
-        "Email/query" => {
-            let mailbox_id = args
-                .get("filter")
-                .and_then(|f| f.get("inMailbox"))
-                .and_then(|v| v.as_str());
-
-            let email_state = jmap
-                .state_store
-                .get_state(user_id, "Email")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-
-            // Check if mailbox_id belongs to a user special folder (e.g. INBOX).
-            // Uses a single indexed EXISTS query instead of fetching the full list.
-            // If so, return smtp: message IDs from mailbox_messages with SQL-side pagination.
-            if let Some(mid) = mailbox_id {
-                let is_special: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM mailboxes WHERE mailbox_id = ?)",
-                )
-                .bind(mid)
-                .fetch_one(&*jmap.mail_pool)
-                .await
-                .unwrap_or(false);
-
-                if is_special {
-                    let position: u64 = args.get("position").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let limit: i64 = args
-                        .get("limit")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(10_000)
-                        .min(10_000) as i64;
-
-                    let total: i64 =
-                        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE mailbox_id = ?")
-                            .bind(mid)
-                            .fetch_one(&*jmap.mail_pool)
-                            .await
-                            .unwrap_or(0);
-
-                    let total = total as u64;
-                    // RFC 8620 §5.5: position in response must be clamped to total.
-                    let response_position = position.min(total);
-
-                    let page: Vec<Value> = sqlx::query_scalar::<_, i64>(
-                        "SELECT id FROM messages \
-                         WHERE mailbox_id = ? \
-                         ORDER BY id DESC LIMIT ? OFFSET ?",
-                    )
-                    .bind(mid)
-                    .bind(limit)
-                    .bind(response_position as i64)
-                    .fetch_all(&*jmap.mail_pool)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|row_id| Value::String(format!("smtp:{row_id}")))
-                    .collect();
-
-                    return json!({
-                        "accountId": canonical_account_id,
-                        "queryState": email_state,
-                        "canCalculateChanges": false,
-                        "position": response_position,
-                        "ids": page,
-                        "total": total,
-                    });
-                }
-            }
-
-            let groups = match jmap.article_numbers.list_groups().await {
-                Ok(g) => g,
-                Err(e) => return json!({"error": e.to_string()}),
-            };
-            let target_group = groups.iter().find(|(name, _, _)| {
-                crate::mailbox::types::mailbox_id_for_group(name) == mailbox_id.unwrap_or("")
-            });
-
-            let (group_name, lo, hi) = match target_group {
-                Some(g) => g.clone(),
-                None => {
-                    return json!({
-                        "accountId": canonical_account_id,
-                        "ids": [],
-                        "total": 0,
-                        "queryState": email_state,
-                        "canCalculateChanges": false,
-                        "position": 0
-                    })
-                }
-            };
-
-            let records = match jmap.overview_store.query_range(&group_name, lo, hi).await {
-                Ok(r) => r,
-                Err(e) => return json!({"error": e.to_string()}),
-            };
-
-            let numbers: Vec<u64> = records.iter().map(|r| r.article_number).collect();
-            let cid_map = jmap
-                .article_numbers
-                .lookup_cids_batch(&group_name, &numbers)
-                .await
-                .unwrap_or_default();
-
-            let mut entries = Vec::new();
-            for rec in &records {
-                if let Some(cid) = cid_map.get(&rec.article_number).copied() {
-                    entries.push(crate::email::query::EmailOverviewEntry {
-                        cid,
-                        message_id: rec.message_id.clone(),
-                        subject: rec.subject.clone(),
-                        from: rec.from.clone(),
-                        date: rec.date.clone(),
-                        byte_count: rec.byte_count,
-                    });
-                }
-            }
-
-            let filter = args.get("filter");
-
-            // Resolve `text` filter via full-text search index when present.
-            let text_results = if let Some(f) = filter {
-                if let Some(text_val) = f.get("text").and_then(|v| v.as_str()) {
-                    if !text_val.is_empty() {
-                        if let Some(ref idx) = jmap.search_index {
-                            match idx.search_all(text_val, 50_000).await {
-                                Ok(ids) => {
-                                    Some(ids.into_iter().collect::<std::collections::HashSet<_>>())
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "JMAP text search failed; ignoring text filter");
-                                    None
-                                }
-                            }
-                        } else {
-                            // Search index not configured; return empty set so the
-                            // text filter is honoured (no results) rather than
-                            // silently returning all articles.
-                            Some(std::collections::HashSet::new())
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let position: u64 = args.get("position").and_then(|v| v.as_u64()).unwrap_or(0);
-            let limit: Option<u64> = args.get("limit").and_then(|v| v.as_u64());
-            crate::email::query::handle_email_query(
-                &entries,
-                filter,
-                position,
-                limit,
-                &email_state,
-                text_results,
-                canonical_account_id,
-            )
-        }
-
-        "Email/get" => {
-            let ids: Vec<String> = args
-                .get("ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // RFC 8620 §3.3: reject requests that exceed maxObjectsInGet (500).
-            // Silently truncating would lie to the caller; a clear error lets
-            // the client split the request rather than getting a partial result.
-            const MAX_IDS: usize = 500;
-            if ids.len() > MAX_IDS {
-                let mut err = JmapError::request_too_large();
-                err.description = Some(format!("ids exceeds maxObjectsInGet limit of {MAX_IDS}"));
-                return serde_json::to_value(&err).unwrap_or(json!({}));
-            }
-            let email_state = jmap
-                .state_store
-                .get_state(user_id, "Email")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-            crate::email::get::handle_email_get(
-                &ids,
-                jmap.ipfs.as_ref(),
-                Some(&*jmap.mail_pool),
-                None,
-                &email_state,
-                canonical_account_id,
-            )
-            .await
         }
 
         "Email/set" => {
@@ -1169,147 +946,6 @@ async fn route_method(
             }
 
             result
-        }
-
-        "Thread/get" => {
-            let requested_ids: Vec<String> = args
-                .get("ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            // Collect overview records to compute thread memberships.
-            //
-            // TODO(stoa-c4zlv.2): This scan is O(total articles across all
-            // groups).  A proper fix requires a dedicated thread-index table
-            // mapping (group, message_id) → thread_root.  Until then, cap the
-            // total entries scanned to avoid multi-second latency on large corpora.
-            const MAX_THREAD_SCAN: usize = 5000;
-
-            let groups = match jmap.article_numbers.list_groups().await {
-                Ok(g) => g,
-                Err(e) => return json!({"error": e.to_string()}),
-            };
-
-            let mut entries: Vec<crate::thread::get::ThreadEntry> = Vec::new();
-            let requested_set: std::collections::HashSet<&str> =
-                requested_ids.iter().map(String::as_str).collect();
-            let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut total_scanned: usize = 0;
-
-            'outer: for (group_name, lo, hi) in &groups {
-                let records = match jmap.overview_store.query_range(group_name, *lo, *hi).await {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let numbers: Vec<u64> = records.iter().map(|r| r.article_number).collect();
-                let cid_map = jmap
-                    .article_numbers
-                    .lookup_cids_batch(group_name, &numbers)
-                    .await
-                    .unwrap_or_default();
-                for rec in &records {
-                    if let Some(cid) = cid_map.get(&rec.article_number).copied() {
-                        let tid =
-                            crate::thread::get::thread_id_for(&rec.references, &rec.message_id);
-                        if requested_set.contains(tid.as_str()) {
-                            found.insert(tid);
-                        }
-                        entries.push(crate::thread::get::ThreadEntry {
-                            email_id: cid.to_string(),
-                            references: rec.references.clone(),
-                            message_id: rec.message_id.clone(),
-                        });
-                    }
-                    total_scanned += 1;
-                    if total_scanned >= MAX_THREAD_SCAN {
-                        break 'outer;
-                    }
-                }
-                // Early exit: all requested threads found.
-                if found.len() == requested_set.len() {
-                    break;
-                }
-            }
-
-            let thread_state = jmap
-                .state_store
-                .get_state(user_id, "Thread")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-
-            let id_refs: Vec<&str> = requested_ids.iter().map(|s| s.as_str()).collect();
-            crate::thread::get::handle_thread_get(
-                &entries,
-                &id_refs,
-                &thread_state,
-                canonical_account_id,
-            )
-        }
-
-        // RFC 8620 §5.2 — /changes methods for incremental sync.
-        "Email/changes" => {
-            let since_state_str = args
-                .get("sinceState")
-                .and_then(|v| v.as_str())
-                .unwrap_or("0");
-            let since_seq: i64 = match since_state_str.parse() {
-                Ok(n) if n >= 0 => n,
-                _ => {
-                    let new_state = jmap
-                        .state_store
-                        .get_state(user_id, "Email")
-                        .await
-                        .unwrap_or_else(|_| "0".to_string());
-                    return json!({
-                        "type": "cannotCalculateChanges",
-                        "newState": new_state
-                    });
-                }
-            };
-
-            let new_state = jmap
-                .state_store
-                .get_state(user_id, "Email")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-
-            let created = match jmap
-                .change_log
-                .query_since(user_id, "Email", since_seq)
-                .await
-            {
-                Ok(ids) => ids,
-                Err(e) => return json!({"error": e.to_string()}),
-            };
-
-            json!({
-                "accountId": canonical_account_id,
-                "oldState": since_state_str,
-                "newState": new_state,
-                "created": created,
-                "updated": [],
-                "destroyed": [],
-                "hasMoreChanges": false
-            })
-        }
-
-        "Mailbox/changes" => {
-            let new_state = jmap
-                .state_store
-                .get_state(user_id, "Mailbox")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-            // Mailboxes are NNTP groups; membership changes are not tracked in
-            // the change log.  RFC 8620 §5.2 permits returning cannotCalculateChanges.
-            json!({
-                "type": "cannotCalculateChanges",
-                "newState": new_state
-            })
         }
 
         // RFC 9404 §4.1: Blob/get — return base64url-encoded raw block bytes

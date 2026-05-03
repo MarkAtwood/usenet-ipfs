@@ -272,7 +272,10 @@ async fn create_one_email(
         rcpt_list.extend(extract_email_addrs(obj.get("cc")));
         if !rcpt_list.is_empty() {
             let rcpts: Vec<&str> = rcpt_list.iter().map(String::as_str).collect();
-            if let Err(e) = queue.enqueue(article.as_bytes(), &from_email, &rcpts, false).await {
+            if let Err(e) = queue
+                .enqueue(article.as_bytes(), &from_email, &rcpts, false)
+                .await
+            {
                 tracing::warn!("smtp relay enqueue failed: {e}");
                 stoa_smtp::metrics::inc_relay_enqueue_failure();
             }
