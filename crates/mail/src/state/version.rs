@@ -23,16 +23,21 @@ impl StateStore {
     }
 
     /// Increment the version for a scope and return the new state string.
+    ///
+    /// Uses a single `INSERT … RETURNING` so the read is atomic with the write,
+    /// eliminating the TOCTOU window that existed when a separate SELECT followed
+    /// the INSERT.
     pub async fn bump_state(&self, user_id: i64, scope: &str) -> Result<String, sqlx::Error> {
-        sqlx::query(
+        let (version,): (i64,) = sqlx::query_as(
             "INSERT INTO state_version (user_id, scope, version) VALUES (?, ?, 1)
-             ON CONFLICT(user_id, scope) DO UPDATE SET version = version + 1",
+             ON CONFLICT(user_id, scope) DO UPDATE SET version = version + 1
+             RETURNING version",
         )
         .bind(user_id)
         .bind(scope)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        self.get_state(user_id, scope).await
+        Ok(version.to_string())
     }
 }
 

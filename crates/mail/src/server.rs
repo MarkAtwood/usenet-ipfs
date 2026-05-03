@@ -1105,7 +1105,8 @@ async fn route_method(
             result["oldState"] = Value::String(old_state);
             result["newState"] = Value::String(new_state.clone());
 
-            // Record newly created CIDs in the change log for Email/changes.
+            // Record changes in the change log for Email/changes.
+            let new_seq: i64 = new_state.parse().unwrap_or(0);
             if let Some(created_obj) = result["created"].as_object() {
                 let new_cid_ids: Vec<String> = created_obj
                     .values()
@@ -1114,13 +1115,24 @@ async fn route_method(
                     .map(str::to_string)
                     .collect();
                 if !new_cid_ids.is_empty() {
-                    let new_seq: i64 = new_state.parse().unwrap_or(0);
                     if let Err(e) = jmap
                         .change_log
                         .record_created(user_id, "Email", &new_cid_ids, new_seq)
                         .await
                     {
                         tracing::warn!("change_log.record_created failed: {e}");
+                    }
+                }
+            }
+            if let Some(updated_obj) = result["updated"].as_object() {
+                let updated_ids: Vec<String> = updated_obj.keys().cloned().collect();
+                if !updated_ids.is_empty() {
+                    if let Err(e) = jmap
+                        .change_log
+                        .record_updated(user_id, "Email", &updated_ids, new_seq)
+                        .await
+                    {
+                        tracing::warn!("change_log.record_updated failed: {e}");
                     }
                 }
             }
