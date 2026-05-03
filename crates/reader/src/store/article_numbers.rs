@@ -213,6 +213,64 @@ impl ArticleNumberStore {
         Ok(row.map(|(g, n)| (g, n as u64)))
     }
 
+    /// Return the smallest article number in `group` that is strictly greater
+    /// than `current`.  Returns `None` when `current` is already the last article.
+    ///
+    /// Used by the NEXT command handler to advance the article pointer.
+    pub async fn next_after(
+        &self,
+        group: &str,
+        current: u64,
+    ) -> Result<Option<(u64, Cid)>, sqlx::Error> {
+        let current = current as i64;
+        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT article_number, cid FROM article_numbers \
+             WHERE group_name = ? AND article_number > ? \
+             ORDER BY article_number ASC LIMIT 1",
+        )
+        .bind(group)
+        .bind(current)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            None => Ok(None),
+            Some((n, cid_bytes)) => {
+                let cid = Cid::try_from(cid_bytes.as_slice())
+                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+                Ok(Some((n as u64, cid)))
+            }
+        }
+    }
+
+    /// Return the largest article number in `group` that is strictly less than
+    /// `current`.  Returns `None` when `current` is already the first article.
+    ///
+    /// Used by the LAST command handler to retreat the article pointer.
+    pub async fn prev_before(
+        &self,
+        group: &str,
+        current: u64,
+    ) -> Result<Option<(u64, Cid)>, sqlx::Error> {
+        let current = current as i64;
+        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT article_number, cid FROM article_numbers \
+             WHERE group_name = ? AND article_number < ? \
+             ORDER BY article_number DESC LIMIT 1",
+        )
+        .bind(group)
+        .bind(current)
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            None => Ok(None),
+            Some((n, cid_bytes)) => {
+                let cid = Cid::try_from(cid_bytes.as_slice())
+                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+                Ok(Some((n as u64, cid)))
+            }
+        }
+    }
+
     /// Returns `(1, 0)` for an empty group (RFC 3977 convention: `low > high`
     /// means empty).
     pub async fn group_range(&self, group: &str) -> Result<(u64, u64), sqlx::Error> {

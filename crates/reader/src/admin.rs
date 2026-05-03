@@ -289,10 +289,24 @@ pub(crate) fn check_bearer_token(auth_header: Option<&str>, bearer_token: Option
         None => true,
         Some(token) => {
             let expected = format!("Bearer {token}");
-            match auth_header {
-                None => false,
-                Some(header) => expected.as_bytes().ct_eq(header.as_bytes()).into(),
-            }
+            let header = match auth_header {
+                None => "",
+                Some(h) => h,
+            };
+            // NOTE: subtle::ConstantTimeEq on slices of different lengths returns 0
+            // immediately without comparing bytes, leaking the expected token length
+            // through response timing.  We equalise lengths by zero-padding both
+            // sides to `max_len` before comparing so the ct_eq loop always runs
+            // `max_len` iterations regardless of the actual input lengths.
+            let max_len = expected.len().max(header.len());
+            let mut a = vec![0u8; max_len];
+            let mut b = vec![0u8; max_len];
+            a[..expected.len()].copy_from_slice(expected.as_bytes());
+            b[..header.len()].copy_from_slice(header.as_bytes());
+            // Length mismatch is always a rejection; the ct_eq result folds that in.
+            let lengths_equal = subtle::Choice::from((expected.len() == header.len()) as u8);
+            let bytes_equal = a.ct_eq(&b);
+            (lengths_equal & bytes_equal).into()
         }
     }
 }

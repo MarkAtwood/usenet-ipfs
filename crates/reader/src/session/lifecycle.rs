@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, info, warn, Instrument};
 
 use stoa_core::audit::AuditEvent;
+use stoa_core::validation::validate_message_id;
 use stoa_core::ArticleRootNode;
 
 use crate::{
@@ -553,6 +554,12 @@ where
                 continue;
             }
             Command::Xcid(arg) => {
+                if let Some(ref msgid) = arg {
+                    if validate_message_id(msgid).is_err() {
+                        send!(Response::syntax_error());
+                        continue;
+                    }
+                }
                 let resp = handle_xcid(
                     stores,
                     arg.as_deref(),
@@ -568,6 +575,10 @@ where
                 expected_cid,
                 verify_sig,
             } => {
+                if validate_message_id(message_id).is_err() {
+                    send!(Response::syntax_error());
+                    continue;
+                }
                 let resp = handle_xverify(stores, message_id, expected_cid, *verify_sig).await;
                 send!(resp);
                 continue;
@@ -580,6 +591,65 @@ where
                 )
                 .await;
                 send!(resp);
+                continue;
+            }
+            Command::Next => {
+                let resp = handle_next_live(stores, ctx).await;
+                send!(resp);
+                continue;
+            }
+            Command::Last => {
+                let resp = handle_last_live(stores, ctx).await;
+                send!(resp);
+                continue;
+            }
+            Command::Ihave(message_id) => {
+                if validate_message_id(message_id).is_err() {
+                    send!(Response::syntax_error());
+                    continue;
+                }
+                // RFC 3977 §6.3.2: send 335, read dot-terminated body, respond 235/437.
+                // Storage of transit-fed articles is not yet implemented; respond 437
+                // (article rejected) after reading the body to keep the connection valid.
+                if writer
+                    .write_all(b"335 Send it; end with <CR-LF>.<CR-LF>\r\n")
+                    .await
+                    .is_err()
+                {
+                    return CommandLoopExit::Done;
+                }
+                let body_timeout =
+                    std::time::Duration::from_secs(config.limits.post_body_timeout_secs);
+                let read_result = tokio::time::timeout(
+                    body_timeout,
+                    read_dot_terminated(reader, config.limits.max_article_bytes),
+                )
+                .await;
+                match read_result {
+                    Err(_elapsed) => {
+                        warn!(peer = %peer_addr, "IHAVE body upload timed out");
+                        let _ = writer
+                            .write_all(b"400 Timeout - closing connection\r\n")
+                            .await;
+                        return CommandLoopExit::Done;
+                    }
+                    Ok(Ok(_article_bytes)) => {
+                        // Body received; storage not yet implemented — reject.
+                        if writer.write_all(b"437 Article rejected\r\n").await.is_err() {
+                            return CommandLoopExit::Done;
+                        }
+                    }
+                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        warn!(peer = %peer_addr, "IHAVE rejected: article too large");
+                        if writer.write_all(b"437 Article too large\r\n").await.is_err() {
+                            return CommandLoopExit::Done;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!(peer = %peer_addr, "IHAVE read error: {e}");
+                        return CommandLoopExit::Done;
+                    }
+                }
                 continue;
             }
             Command::Group(name) => {
@@ -1802,6 +1872,82 @@ async fn handle_group_live(
     });
     ctx.state = SessionState::GroupSelected;
     Response::group_selected(name, count, low, high)
+}
+
+/// NEXT: advance the article pointer to the next article in the current group.
+///
+/// RFC 3977 §6.1.3:
+/// - 412 if no group is selected.
+/// - 420 if no current article number (pointer not set).
+/// - 421 if already at the last article.
+/// - 223 n message-id on success; updates the article pointer.
+async fn handle_next_live(stores: &ServerStores, ctx: &mut SessionContext) -> Response {
+    let (group, current) = match ctx.selected_group.as_ref() {
+        None => return Response::no_newsgroup_selected(),
+        Some(sg) => match sg.article_number {
+            None => return Response::current_article_invalid(),
+            Some(n) => (sg.name.as_str().to_string(), n),
+        },
+    };
+    match stores.article_numbers.next_after(&group, current).await {
+        Ok(None) => Response::no_next_article(),
+        Ok(Some((next_n, _cid))) => {
+            let msgid = stores
+                .overview_store
+                .query_by_number(&group, next_n)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.message_id)
+                .unwrap_or_default();
+            if let Some(sg) = ctx.selected_group.as_mut() {
+                sg.article_number = Some(next_n);
+            }
+            Response::article_exists(next_n, &msgid)
+        }
+        Err(e) => {
+            warn!("NEXT article_numbers error: {e}");
+            Response::program_fault()
+        }
+    }
+}
+
+/// LAST: retreat the article pointer to the previous article in the current group.
+///
+/// RFC 3977 §6.1.4:
+/// - 412 if no group is selected.
+/// - 420 if no current article number (pointer not set).
+/// - 422 if already at the first article.
+/// - 223 n message-id on success; updates the article pointer.
+async fn handle_last_live(stores: &ServerStores, ctx: &mut SessionContext) -> Response {
+    let (group, current) = match ctx.selected_group.as_ref() {
+        None => return Response::no_newsgroup_selected(),
+        Some(sg) => match sg.article_number {
+            None => return Response::current_article_invalid(),
+            Some(n) => (sg.name.as_str().to_string(), n),
+        },
+    };
+    match stores.article_numbers.prev_before(&group, current).await {
+        Ok(None) => Response::no_previous_article(),
+        Ok(Some((prev_n, _cid))) => {
+            let msgid = stores
+                .overview_store
+                .query_by_number(&group, prev_n)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.message_id)
+                .unwrap_or_default();
+            if let Some(sg) = ctx.selected_group.as_mut() {
+                sg.article_number = Some(prev_n);
+            }
+            Response::article_exists(prev_n, &msgid)
+        }
+        Err(e) => {
+            warn!("LAST article_numbers error: {e}");
+            Response::program_fault()
+        }
+    }
 }
 
 /// LIST ACTIVE: return live article ranges for all groups that have articles.

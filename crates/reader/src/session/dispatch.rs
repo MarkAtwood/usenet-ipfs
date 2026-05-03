@@ -119,13 +119,37 @@ pub fn dispatch(
         Command::Next | Command::Last => {
             if !ctx.state.group_selected() {
                 Response::no_newsgroup_selected()
+            } else if ctx
+                .selected_group
+                .as_ref()
+                .and_then(|sg| sg.article_number)
+                .is_none()
+            {
+                // RFC 3977 §6.1.3-4: 420 when group is selected but no current article.
+                Response::current_article_invalid()
             } else {
+                // Pointer is set; lifecycle.rs handles actual navigation.
                 Response::no_article_with_number()
             }
         }
         Command::Over(ref arg) => match arg {
             Some(OverArg::MessageId(_)) => Response::overview_follows(),
-            _ => {
+            None => {
+                if !ctx.state.group_selected() {
+                    Response::no_newsgroup_selected()
+                } else if ctx
+                    .selected_group
+                    .as_ref()
+                    .and_then(|sg| sg.article_number)
+                    .is_none()
+                {
+                    // RFC 3977 §8.3.2: 420 when group selected but no current article.
+                    Response::current_article_invalid()
+                } else {
+                    Response::overview_follows()
+                }
+            }
+            Some(OverArg::Range(_)) => {
                 if !ctx.state.group_selected() {
                     Response::no_newsgroup_selected()
                 } else {
@@ -383,8 +407,10 @@ mod tests {
         assert_eq!(resp.code, 412);
     }
 
+    /// RFC 3977 §6.1.3: when group is selected but no current article number is
+    /// set, NEXT must return 420 (current article number is invalid), not 423.
     #[test]
-    fn test_next_with_no_article_returns_423() {
+    fn test_next_with_no_article_returns_420() {
         let mut ctx = ctx_group_selected();
         let resp = dispatch(
             &mut ctx,
@@ -393,7 +419,7 @@ mod tests {
             &no_certs(),
             &no_issuers(),
         );
-        assert_eq!(resp.code, 423);
+        assert_eq!(resp.code, 420);
     }
 
     #[test]
