@@ -433,6 +433,7 @@ impl SmtpRelayQueue {
                         dead = %dead_path.display(),
                         "relay queue: failed to move file to dead/: {mv_err}"
                     );
+                    return;
                 }
             }
         }

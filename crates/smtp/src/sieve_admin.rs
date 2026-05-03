@@ -187,7 +187,8 @@ async fn list_scripts(State(s): State<AdminState>, Path(username): Path<String>)
     if !user_exists(&s, &username) {
         return (StatusCode::NOT_FOUND, "user not found").into_response();
     }
-    match store::list_scripts(&s.pool, &username).await {
+    let username = normalize_username(&username);
+    match store::list_scripts(&s.pool, username).await {
         Ok(scripts) => {
             let entries: Vec<ListScriptEntry> = scripts
                 .into_iter()
@@ -211,7 +212,8 @@ async fn get_script(
     if !valid_script_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid script name").into_response();
     }
-    match store::get_script(&s.pool, &username, &name).await {
+    let username = normalize_username(&username);
+    match store::get_script(&s.pool, username, &name).await {
         Ok(Some(bytes)) => (
             StatusCode::OK,
             [("Content-Type", "text/plain; charset=utf-8")],
@@ -247,9 +249,10 @@ async fn put_script(
         )
             .into_response();
     }
-    match store::save_script(&s.pool, &username, &name, &body, false).await {
+    let username = normalize_username(&username);
+    match store::save_script(&s.pool, username, &name, &body, false).await {
         Ok(()) => {
-            s.sieve_cache.lock().await.remove(&username);
+            s.sieve_cache.lock().await.remove(username);
             (StatusCode::CREATED, "").into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -267,9 +270,10 @@ async fn delete_script(
     if !valid_script_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid script name").into_response();
     }
-    match store::delete_script(&s.pool, &username, &name).await {
+    let username = normalize_username(&username);
+    match store::delete_script(&s.pool, username, &name).await {
         Ok(true) => {
-            s.sieve_cache.lock().await.remove(&username);
+            s.sieve_cache.lock().await.remove(username);
             (StatusCode::NO_CONTENT, "").into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, "script not found").into_response(),
@@ -288,9 +292,10 @@ async fn activate_script(
     if !valid_script_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid script name").into_response();
     }
-    match store::set_active(&s.pool, &username, &name).await {
+    let username = normalize_username(&username);
+    match store::set_active(&s.pool, username, &name).await {
         Ok(true) => {
-            s.sieve_cache.lock().await.remove(&username);
+            s.sieve_cache.lock().await.remove(username);
             (StatusCode::NO_CONTENT, "").into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, "script not found").into_response(),
@@ -418,6 +423,19 @@ fn user_exists(s: &AdminState, username: &str) -> bool {
         return true;
     }
     s.config.auth.users.iter().any(|u| u.username == username)
+}
+
+/// Return the canonical store key for `username`.
+///
+/// The global script key is accepted case-insensitively (e.g. `_GLOBAL`,
+/// `_Global`) but must be stored under the single canonical value
+/// `GLOBAL_SCRIPT_KEY` so that `load_active_script` can find it.
+fn normalize_username(username: &str) -> &str {
+    if username.eq_ignore_ascii_case(crate::config::GLOBAL_SCRIPT_KEY) {
+        crate::config::GLOBAL_SCRIPT_KEY
+    } else {
+        username
+    }
 }
 
 #[cfg(test)]

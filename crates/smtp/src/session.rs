@@ -91,7 +91,7 @@ where
                     if byte[0] == b'\n' {
                         return CmdLine::Line(String::from_utf8_lossy(&buf).into_owned());
                     }
-                    if buf.len() > max_bytes {
+                    if buf.len() >= max_bytes {
                         // Line is too long — drain the rest without buffering
                         // so the session can send 500 and remain coherent.
                         loop {
