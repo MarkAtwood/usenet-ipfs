@@ -4,6 +4,7 @@ pub mod mem_storage;
 pub mod reconcile;
 pub mod sqlite_storage;
 pub mod storage;
+#[cfg(test)]
 pub mod storage_tests;
 pub mod types;
 pub mod verify;

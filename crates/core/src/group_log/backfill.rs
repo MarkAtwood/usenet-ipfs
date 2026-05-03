@@ -167,6 +167,17 @@ where
             .map_err(BackfillError::FetchFailed)?;
         let entry = verified.into_inner();
 
+        // Verify the returned entry's computed ID matches the requested ID.
+        // A peer can return any valid signed entry for a given request; without
+        // this check an attacker can substitute a different entry and cause us
+        // to store it under the wrong ID.
+        let computed_id = LogEntryId::from_entry(&entry);
+        if computed_id != entry_id {
+            return Err(BackfillError::FetchFailed(format!(
+                "entry ID mismatch: requested {entry_id}, peer returned entry with ID {computed_id}"
+            )));
+        }
+
         // Capture want_id's parent IDs on the first fetch.
         // Assert that the first entry dequeued is always want_id: the queue
         // starts with only want_id, so this fires on the very first iteration.
@@ -261,17 +272,6 @@ mod tests {
         GroupName::new("comp.test".to_owned()).unwrap()
     }
 
-    /// Derive a `LogEntryId` by SHA-256 hashing an arbitrary seed.
-    fn make_entry_id(seed: &[u8]) -> LogEntryId {
-        let digest = Code::Sha2_256.digest(seed);
-        LogEntryId::from_bytes(
-            digest
-                .digest()
-                .try_into()
-                .expect("SHA2-256 digest is always 32 bytes"),
-        )
-    }
-
     /// Wrap a `LogEntryId` as a CID so it can appear in `parent_cids`.
     fn entry_id_to_cid(id: &LogEntryId) -> Cid {
         let mh = Multihash::wrap(0x12, id.as_bytes()).expect("valid multihash");
@@ -279,14 +279,20 @@ mod tests {
     }
 
     /// Build a minimal `LogEntry` with the given HLC timestamp, article seed, and
-    /// parent CIDs.
-    fn make_entry(hlc: u64, article_seed: &[u8], parents: Vec<Cid>) -> LogEntry {
-        LogEntry {
+    /// parent CIDs, then compute its true content-derived `LogEntryId`.
+    ///
+    /// The ID is derived from the entry content via `LogEntryId::from_entry` so
+    /// that the backfill ID-verification check (`from_entry(returned) == requested`)
+    /// passes for entries built with this helper.
+    fn make_entry(hlc: u64, article_seed: &[u8], parents: Vec<Cid>) -> (LogEntryId, LogEntry) {
+        let entry = LogEntry {
             hlc_timestamp: hlc,
             article_cid: Cid::new_v1(0x71, Code::Sha2_256.digest(article_seed)),
             operator_signature: vec![],
             parent_cids: parents,
-        }
+        };
+        let id = LogEntryId::from_entry(&entry);
+        (id, entry)
     }
 
     /// Build `n` entries in a chain: genesis → e1 → e2 → … → e_{n-1}.
@@ -300,16 +306,14 @@ mod tests {
         let mut ids: Vec<LogEntryId> = Vec::with_capacity(n);
 
         for i in 0..n {
-            let seed = format!("chain-entry-{i}");
-            let id = make_entry_id(seed.as_bytes());
-
             let parents = if i == 0 {
                 vec![]
             } else {
                 vec![entry_id_to_cid(&ids[i - 1])]
             };
 
-            let entry = make_entry(i as u64 * 1_000, format!("article-{i}").as_bytes(), parents);
+            let (id, entry) =
+                make_entry(i as u64 * 1_000, format!("article-{i}").as_bytes(), parents);
             storage
                 .insert_entry(id.clone(), entry)
                 .await
@@ -438,15 +442,12 @@ mod tests {
     async fn backfill_diamond_dag() {
         let remote = MemLogStorage::new();
 
-        let id_a = make_entry_id(b"diamond-A");
-        let id_b = make_entry_id(b"diamond-B");
-        let id_c = make_entry_id(b"diamond-C");
-        let id_d = make_entry_id(b"diamond-D");
-
-        let entry_a = make_entry(1_000, b"art-A", vec![]);
-        let entry_b = make_entry(2_000, b"art-B", vec![entry_id_to_cid(&id_a)]);
-        let entry_c = make_entry(2_001, b"art-C", vec![entry_id_to_cid(&id_a)]);
-        let entry_d = make_entry(
+        // Build entries bottom-up, deriving each ID from content so that the
+        // backfill ID-verification check passes.
+        let (id_a, entry_a) = make_entry(1_000, b"art-A", vec![]);
+        let (id_b, entry_b) = make_entry(2_000, b"art-B", vec![entry_id_to_cid(&id_a)]);
+        let (id_c, entry_c) = make_entry(2_001, b"art-C", vec![entry_id_to_cid(&id_a)]);
+        let (id_d, entry_d) = make_entry(
             3_000,
             b"art-D",
             vec![entry_id_to_cid(&id_b), entry_id_to_cid(&id_c)],
@@ -542,7 +543,9 @@ mod tests {
     #[tokio::test]
     async fn backfill_fetch_failure() {
         let local = MemLogStorage::new();
-        let missing_id = make_entry_id(b"does-not-exist");
+        // Use a content-derived ID for an entry that does not exist in the
+        // remote store so the fetch callback is invoked and returns an error.
+        let (missing_id, _) = make_entry(999, b"does-not-exist", vec![]);
 
         let result = backfill(&local, &test_group(), missing_id, |id| async move {
             Err::<VerifiedEntry, _>(format!("remote has no entry {id}"))
@@ -572,9 +575,10 @@ mod tests {
         let bad_parent_cid = Cid::new_v1(0x71, short_mh);
 
         let remote = MemLogStorage::new();
-        let tip_id = make_entry_id(b"tip-malformed");
-        // The tip entry has one parent whose CID uses a 20-byte digest.
-        let tip_entry = make_entry(1_000, b"art-tip", vec![bad_parent_cid]);
+        // Build the tip entry with the malformed parent CID, then store it
+        // under its content-derived ID so the backfill ID check passes and
+        // backfill proceeds to the parent-CID validation step.
+        let (tip_id, tip_entry) = make_entry(1_000, b"art-tip", vec![bad_parent_cid]);
         remote
             .insert_entry(tip_id.clone(), tip_entry)
             .await
@@ -604,8 +608,7 @@ mod tests {
     #[tokio::test]
     async fn backfill_already_local_returns_zero() {
         let local = MemLogStorage::new();
-        let id = make_entry_id(b"already-local");
-        let entry = make_entry(42, b"art-local", vec![]);
+        let (id, entry) = make_entry(42, b"art-local", vec![]);
 
         local.insert_entry(id.clone(), entry).await.unwrap();
 
@@ -674,12 +677,10 @@ mod tests {
         let local = MemLogStorage::new();
         let group = test_group();
 
-        // Build a two-entry chain: parent → child.
-        let parent_id = make_entry_id(b"stale-tip-parent");
-        let child_id = make_entry_id(b"stale-tip-child");
-
-        let parent_entry = make_entry(1_000, b"art-parent", vec![]);
-        let child_entry = make_entry(2_000, b"art-child", vec![entry_id_to_cid(&parent_id)]);
+        // Build a two-entry chain: parent → child, using content-derived IDs.
+        let (parent_id, parent_entry) = make_entry(1_000, b"art-parent", vec![]);
+        let (child_id, child_entry) =
+            make_entry(2_000, b"art-child", vec![entry_id_to_cid(&parent_id)]);
 
         local
             .insert_entry(parent_id.clone(), parent_entry)

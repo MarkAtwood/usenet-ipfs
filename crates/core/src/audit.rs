@@ -438,7 +438,15 @@ async fn flush_buffer(pool: &AnyPool, buffer: &mut Vec<(i64, AuditEvent)>) {
                 .bind(event.to_json());
         }
         if let Err(e) = q.execute(&mut *tx).await {
-            tracing::error!("audit logger: bulk insert failed: {e}");
+            let count = buffer.len() as u64;
+            let total = AUDIT_EVENTS_DROPPED.fetch_add(count, Ordering::Relaxed) + count;
+            tracing::error!(
+                audit_events_dropped_total = total,
+                dropped_this_flush = count,
+                "audit logger: bulk insert failed, dropping buffered events: {e}"
+            );
+            buffer.clear();
+            return;
         }
     }
 
