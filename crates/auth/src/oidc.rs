@@ -47,6 +47,8 @@ struct Jwk {
     #[serde(rename = "e")]
     rsa_e: Option<String>,
     // EC public key components (base64url-encoded).
+    #[serde(rename = "crv")]
+    ec_crv: Option<String>,
     #[serde(rename = "x")]
     ec_x: Option<String>,
     #[serde(rename = "y")]
@@ -284,10 +286,28 @@ fn decoding_key_and_alg(jwk: &Jwk) -> Result<(DecodingKey, Algorithm), OidcError
             let key = DecodingKey::from_ec_components(x, y)
                 .map_err(|e| OidcError::InvalidKey(e.to_string()))?;
             let alg = match jwk.alg.as_deref() {
-                Some("ES256") | None => Algorithm::ES256,
+                Some("ES256") => Algorithm::ES256,
                 Some("ES384") => Algorithm::ES384,
                 // ES512 is not implemented in the jsonwebtoken crate (see AlgorithmFamily::Ec).
                 Some(other) => return Err(OidcError::UnsupportedAlgorithm(other.to_string())),
+                None => {
+                    // When alg is absent, infer from the crv (curve) field per RFC 7518 §6.2.1.1.
+                    // Defaulting to ES256 would silently misidentify P-384/P-521 keys.
+                    match jwk.ec_crv.as_deref() {
+                        Some("P-256") => Algorithm::ES256,
+                        Some("P-384") => Algorithm::ES384,
+                        Some(other) => {
+                            return Err(OidcError::UnsupportedAlgorithm(format!(
+                                "EC curve '{other}' (no alg field; ES512/P-521 not supported)"
+                            )))
+                        }
+                        None => {
+                            return Err(OidcError::InvalidKey(
+                                "EC JWK has no 'alg' and no 'crv' field; cannot determine algorithm".into(),
+                            ))
+                        }
+                    }
+                }
             };
             Ok((key, alg))
         }
@@ -430,6 +450,7 @@ mod tests {
             alg: Some("RS256".into()),
             rsa_n: None,
             rsa_e: Some("AQAB".into()),
+            ec_crv: None,
             ec_x: None,
             ec_y: None,
         };
@@ -449,6 +470,7 @@ mod tests {
             alg: Some("RS256".into()),
             rsa_n: Some("somemodulus".into()),
             rsa_e: None,
+            ec_crv: None,
             ec_x: None,
             ec_y: None,
         };
@@ -468,6 +490,7 @@ mod tests {
             alg: Some("ES256".into()),
             rsa_n: None,
             rsa_e: None,
+            ec_crv: Some("P-256".into()),
             ec_x: None,
             ec_y: None,
         };
@@ -487,6 +510,7 @@ mod tests {
             alg: Some("HS256".into()),
             rsa_n: None,
             rsa_e: None,
+            ec_crv: None,
             ec_x: None,
             ec_y: None,
         };
@@ -506,6 +530,7 @@ mod tests {
             alg: Some("HS256".into()), // HMAC — not acceptable for OIDC
             rsa_n: Some("AQAB".into()),
             rsa_e: Some("AQAB".into()),
+            ec_crv: None,
             ec_x: None,
             ec_y: None,
         };
@@ -527,6 +552,7 @@ mod tests {
             // (semantically invalid — tests alg selection only, not key validity).
             rsa_n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".into()),
             rsa_e: Some("AQAB".into()),
+            ec_crv: None,
             ec_x: None,
             ec_y: None,
         };
@@ -537,6 +563,88 @@ mod tests {
             }
             Err(e) => panic!("unexpected error: {e}"),
         }
+    }
+
+    /// EC JWK with no `alg` but `crv = "P-256"` must select ES256.
+    #[test]
+    fn ec_jwk_no_alg_p256_infers_es256() {
+        let jwk = Jwk {
+            kid: None,
+            kty: "EC".into(),
+            key_use: Some("sig".into()),
+            alg: None,
+            rsa_n: None,
+            rsa_e: None,
+            ec_crv: Some("P-256".into()),
+            ec_x: Some("AAAA".into()),
+            ec_y: Some("AAAA".into()),
+        };
+        match decoding_key_and_alg(&jwk) {
+            Ok((_, alg)) => assert_eq!(alg, Algorithm::ES256),
+            Err(OidcError::InvalidKey(_)) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    /// EC JWK with no `alg` but `crv = "P-384"` must select ES384, not ES256.
+    #[test]
+    fn ec_jwk_no_alg_p384_infers_es384() {
+        let jwk = Jwk {
+            kid: None,
+            kty: "EC".into(),
+            key_use: Some("sig".into()),
+            alg: None,
+            rsa_n: None,
+            rsa_e: None,
+            ec_crv: Some("P-384".into()),
+            ec_x: Some("AAAA".into()),
+            ec_y: Some("AAAA".into()),
+        };
+        match decoding_key_and_alg(&jwk) {
+            Ok((_, alg)) => assert_eq!(alg, Algorithm::ES384),
+            Err(OidcError::InvalidKey(_)) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    /// EC JWK with no `alg` and no `crv` must return `InvalidKey`.
+    #[test]
+    fn ec_jwk_no_alg_no_crv_returns_invalid_key() {
+        let jwk = Jwk {
+            kid: None,
+            kty: "EC".into(),
+            key_use: Some("sig".into()),
+            alg: None,
+            rsa_n: None,
+            rsa_e: None,
+            ec_crv: None,
+            ec_x: Some("AAAA".into()),
+            ec_y: Some("AAAA".into()),
+        };
+        assert!(matches!(
+            decoding_key_and_alg(&jwk),
+            Err(OidcError::InvalidKey(_))
+        ));
+    }
+
+    /// EC JWK with no `alg` and an unrecognized curve must return `UnsupportedAlgorithm`.
+    #[test]
+    fn ec_jwk_no_alg_unknown_crv_returns_unsupported_algorithm() {
+        let jwk = Jwk {
+            kid: None,
+            kty: "EC".into(),
+            key_use: Some("sig".into()),
+            alg: None,
+            rsa_n: None,
+            rsa_e: None,
+            ec_crv: Some("brainpoolP256r1".into()),
+            ec_x: Some("AAAA".into()),
+            ec_y: Some("AAAA".into()),
+        };
+        assert!(matches!(
+            decoding_key_and_alg(&jwk),
+            Err(OidcError::UnsupportedAlgorithm(_))
+        ));
     }
 
     /// OidcStore with zero providers returns an error immediately.
