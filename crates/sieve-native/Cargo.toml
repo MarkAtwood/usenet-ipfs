@@ -10,7 +10,7 @@ license = "MIT"
 # unit tests to confirm glob-to-regex conversion is unchanged, then cross-check
 # a sample of sieve scripts against the stoa-sieve (AGPL) reference evaluator.
 fancy-regex = "0.13"
-lru = "0.12"
+lru = "0.18"
 tracing = "0.1"
 
 [dev-dependencies]
