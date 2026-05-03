@@ -75,9 +75,10 @@ pub trait LogStorage: Send + Sync {
     /// Returns `StorageError::DuplicateEntry` if the entry already exists;
     /// in that case the tip set is **not** modified.
     ///
-    /// The default implementation calls `insert_entry` then `advance_tips`
-    /// sequentially (not crash-safe; acceptable for in-memory test storage).
-    /// SQL-backed implementations override this with a single transaction.
+    /// There is no default implementation.  Each backend must implement this
+    /// method.  Persistent backends (e.g. SQLite) must wrap both operations in
+    /// a single transaction.  In-memory backends may call the two operations
+    /// sequentially — there is no durable state to corrupt on a crash.
     fn insert_entry_and_advance_tips(
         &self,
         id: LogEntryId,
