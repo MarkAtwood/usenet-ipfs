@@ -53,6 +53,18 @@ impl std::fmt::Display for GroupName {
     }
 }
 
+impl AsRef<str> for GroupName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<GroupName> for String {
+    fn from(g: GroupName) -> Self {
+        g.0
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for GroupName {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;

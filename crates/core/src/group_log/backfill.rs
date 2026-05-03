@@ -162,7 +162,7 @@ where
 
         visited.insert(key);
 
-        let verified = fetch(entry_id.clone())
+        let verified = fetch(entry_id)
             .await
             .map_err(BackfillError::FetchFailed)?;
         let entry = verified.into_inner();

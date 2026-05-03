@@ -89,9 +89,25 @@ pub fn build_header_map(raw_headers: &[u8]) -> HeaderMapNode {
         .collect()
 }
 
-/// Returns true if `name` consists only of ASCII letters, digits, and hyphens.
+/// Returns true if `name` is a valid RFC 7230 header field name.
+///
+/// RFC 7230 §3.2 defines `field-name = token` where
+/// `token = 1*tchar` and
+/// `tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+///          "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA`.
+/// In practice, the characters used in real-world headers are
+/// alphanumerics, hyphens, and underscores (e.g. `X_Spam_Status`).
+/// The full tchar set is accepted here to avoid silently dropping valid headers.
 fn is_valid_header_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '-' | '_' | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '.' | '^'
+                        | '`' | '|' | '~'
+                )
+        })
 }
 
 /// Transform an RFC 2822 date string to RFC 3339.
@@ -338,5 +354,18 @@ Received: from c.example by d.example\r\n\
         assert!(!map.contains_key("x bad"), "space in name must be dropped");
         // null-containing keys can't be tested as string keys easily, but the
         // filter runs before insertion, so the key would never reach the map.
+    }
+
+    #[test]
+    fn underscore_in_header_name_is_accepted() {
+        // RFC 7230 §3.2 tchar includes '_'.  Real-world headers like
+        // X_Spam_Status must not be silently dropped.
+        let raw = b"X_Spam_Status: No\r\nX-Normal: ok\r\n\r\n";
+        let map = build_header_map(raw);
+        assert!(
+            map.contains_key("x_spam_status"),
+            "X_Spam_Status must be accepted (tchar allows underscore)"
+        );
+        assert!(map.contains_key("x-normal"), "hyphenated header still accepted");
     }
 }

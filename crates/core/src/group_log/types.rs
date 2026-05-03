@@ -5,7 +5,7 @@ use std::fmt;
 
 /// A 32-byte identifier for a log entry, typically the SHA-256 of its
 /// canonical serialization.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LogEntryId([u8; 32]);
 
 impl LogEntryId {
