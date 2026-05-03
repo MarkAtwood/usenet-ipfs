@@ -248,11 +248,23 @@ pub async fn verify_http_signature(
     let signed_headers_spec =
         parse_sig_param(sig_header, "headers").unwrap_or("(request-target) host date".to_string());
 
+    // stoa-ftx6h.9: enforce a minimum signed-header set regardless of what
+    // the (attacker-controlled) headers= parameter says.  Without this, an
+    // attacker can omit (request-target) or date and replay the signature
+    // against a different path or at an arbitrary time.
+    enforce_minimum_signed_headers(&signed_headers_spec, method)?;
+
     let sig_b64 = parse_sig_param(sig_header, "signature")
         .ok_or_else(|| "Signature header missing signature".to_string())?;
 
     // Reconstruct the signed string (needed for both cache-hit and miss paths).
     let signed_string = build_signed_string(method, path, headers, body, &signed_headers_spec)?;
+
+    // stoa-ftx6h.13: validate that the actor URL derived from keyId lives on
+    // the same host as keyId itself.  This must be done before any cache
+    // lookup or fetch so that an attacker cannot slip through on a cache hit.
+    let actor_url = key_id.split('#').next().unwrap_or(&key_id).to_string();
+    validate_keyid_domain(&key_id, &actor_url)?;
 
     // Fast path: try cache under read lock.
     {
@@ -260,7 +272,6 @@ pub async fn verify_http_signature(
         if let Some((pem, fetched_at)) = cache.get(&key_id) {
             if fetched_at.elapsed() < crate::activitypub::PUB_KEY_CACHE_TTL {
                 verify_rsa_sha256(pem, &signed_string, &sig_b64)?;
-                let actor_url = key_id.split('#').next().unwrap_or(&key_id).to_string();
                 return Ok(actor_url);
             }
         }
@@ -279,21 +290,18 @@ pub async fn verify_http_signature(
                 pem.clone()
             } else {
                 // Stale — fetch fresh while holding write lock.
-                let fresh = fetch_public_key(&key_id, http_client).await?;
+                let fresh = fetch_public_key(&key_id, &actor_url, http_client).await?;
                 cache.insert(key_id.clone(), (fresh.clone(), Instant::now()));
                 fresh
             }
         } else {
             // Not in cache — fetch while holding write lock.
-            let fresh = fetch_public_key(&key_id, http_client).await?;
+            let fresh = fetch_public_key(&key_id, &actor_url, http_client).await?;
             cache.insert(key_id.clone(), (fresh.clone(), Instant::now()));
             fresh
         }
     };
     verify_rsa_sha256(&pem, &signed_string, &sig_b64)?;
-
-    // Extract actor URL: the part of keyId before the fragment.
-    let actor_url = key_id.split('#').next().unwrap_or(&key_id).to_string();
     Ok(actor_url)
 }
 
@@ -343,8 +351,16 @@ fn split_sig_params(header: &str) -> Vec<&str> {
 const ACTOR_FETCH_MAX_BYTES: usize = 64 * 1024;
 
 /// Fetch and extract the RSA public key PEM from an ActivityPub actor document.
-async fn fetch_public_key(key_id: &str, http_client: &reqwest::Client) -> Result<String, String> {
-    let actor_url = key_id.split('#').next().unwrap_or(key_id);
+///
+/// `actor_url` is the canonical actor URL derived from `key_id` (the part
+/// before any `#` fragment).  The fetched document's `id` field must lie on
+/// the same host as `key_id`; if it does not, the fetch is rejected to prevent
+/// cross-domain key substitution (stoa-ftx6h.13).
+async fn fetch_public_key(
+    key_id: &str,
+    actor_url: &str,
+    http_client: &reqwest::Client,
+) -> Result<String, String> {
     let resp = http_client
         .get(actor_url)
         .header("Accept", "application/activity+json, application/json")
@@ -382,12 +398,90 @@ async fn fetch_public_key(key_id: &str, http_client: &reqwest::Client) -> Result
     let actor: Value =
         serde_json::from_slice(&buf).map_err(|e| format!("failed to parse actor JSON: {e}"))?;
 
+    // stoa-ftx6h.13: validate that the fetched document's canonical `id`
+    // lives on the same host as the keyId.  A response whose `id` points to
+    // a different domain than the keyId URL indicates cross-domain key
+    // substitution and must be rejected.
+    if let Some(doc_id) = actor["id"].as_str() {
+        validate_keyid_domain(key_id, doc_id).map_err(|e| {
+            format!("fetched actor document id domain mismatch: {e}")
+        })?;
+    } else {
+        return Err("fetched actor document has no 'id' field".to_string());
+    }
+
     let pem = actor["publicKey"]["publicKeyPem"]
         .as_str()
         .ok_or_else(|| "actor has no publicKey.publicKeyPem".to_string())?
         .to_string();
 
     Ok(pem)
+}
+
+/// Enforce that the `headers=` list from the Signature header contains the
+/// minimum required components.
+///
+/// Required always: `(request-target)`, `host`, `date`.
+/// Required for POST and PUT (body-carrying methods): `digest`.
+///
+/// This prevents an attacker from omitting critical headers from the signed
+/// string, which would allow replay across different paths or stale requests.
+fn enforce_minimum_signed_headers(signed_headers_spec: &str, method: &str) -> Result<(), String> {
+    let lower: Vec<&str> = signed_headers_spec.split_whitespace().collect();
+    for required in &["(request-target)", "host", "date"] {
+        if !lower.contains(required) {
+            return Err(format!(
+                "Signature headers= list missing required component: {required}"
+            ));
+        }
+    }
+    let method_upper = method.to_uppercase();
+    if method_upper == "POST" || method_upper == "PUT" {
+        if !lower.contains(&"digest") {
+            return Err(
+                "Signature headers= list missing required 'digest' for body-carrying request"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Validate that the host of `key_id` and `actor_url` match.
+///
+/// An attacker can set `keyId` to their own server and host a crafted key.
+/// If the derived `actor_url` (the part before `#`) resolves to a different
+/// host than `key_id`, someone is attempting cross-domain key substitution.
+pub fn validate_keyid_domain(key_id: &str, actor_url: &str) -> Result<(), String> {
+    let key_host = extract_host(key_id)
+        .ok_or_else(|| format!("keyId has no parseable host: {key_id}"))?;
+    let actor_host = extract_host(actor_url)
+        .ok_or_else(|| format!("actor_url has no parseable host: {actor_url}"))?;
+    if key_host != actor_host {
+        return Err(format!(
+            "keyId host ({key_host}) does not match actor_url host ({actor_host}); \
+             cross-domain key substitution rejected"
+        ));
+    }
+    Ok(())
+}
+
+/// Extract the host (and optional port) from an `http://` or `https://` URL.
+///
+/// Returns `None` if the URL has no recognisable scheme+host.
+fn extract_host(url: &str) -> Option<String> {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    // Host ends at the first '/', '?', '#', or end-of-string.
+    let host = without_scheme
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
 }
 
 /// Build the signed string from the request components.
@@ -414,11 +508,18 @@ fn build_signed_string(
             "digest" => {
                 let hash = Sha256::digest(body);
                 let computed = format!("SHA-256={}", BASE64.encode(&hash));
+                // stoa-ftx6h.8: if the Signature headers= list includes
+                // "digest", the actual Digest header MUST be present.
+                // Silently substituting the computed hash would let an
+                // attacker omit the Digest header and swap the body without
+                // invalidating the signature.
                 let provided = headers
                     .get("digest")
                     .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-                if !provided.is_empty() && provided != computed {
+                    .ok_or_else(|| {
+                        "Digest header required by Signature but absent".to_string()
+                    })?;
+                if provided != computed {
                     return Err(format!(
                         "Digest mismatch: provided={provided}, computed={computed}"
                     ));
@@ -671,6 +772,158 @@ mod tests {
             parse_sig_param(header, "signature"),
             Some("xyz".to_string()),
             "token after quoted-comma value must still be found"
+        );
+    }
+
+    // ── enforce_minimum_signed_headers (stoa-ftx6h.9) ───────────────────────
+
+    #[test]
+    fn enforce_min_headers_ok() {
+        assert!(
+            enforce_minimum_signed_headers("(request-target) host date", "GET").is_ok()
+        );
+    }
+
+    #[test]
+    fn enforce_min_headers_missing_request_target() {
+        let err = enforce_minimum_signed_headers("host date", "GET").unwrap_err();
+        assert!(
+            err.contains("(request-target)"),
+            "error must name the missing component: {err}"
+        );
+    }
+
+    #[test]
+    fn enforce_min_headers_missing_host() {
+        let err = enforce_minimum_signed_headers("(request-target) date", "GET").unwrap_err();
+        assert!(err.contains("host"), "error must name the missing component: {err}");
+    }
+
+    #[test]
+    fn enforce_min_headers_missing_date() {
+        let err = enforce_minimum_signed_headers("(request-target) host", "GET").unwrap_err();
+        assert!(err.contains("date"), "error must name the missing component: {err}");
+    }
+
+    #[test]
+    fn enforce_min_headers_post_requires_digest() {
+        let err =
+            enforce_minimum_signed_headers("(request-target) host date", "POST").unwrap_err();
+        assert!(
+            err.contains("digest"),
+            "POST without digest must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn enforce_min_headers_post_with_digest_ok() {
+        assert!(
+            enforce_minimum_signed_headers("(request-target) host date digest", "POST").is_ok()
+        );
+    }
+
+    // ── validate_keyid_domain (stoa-ftx6h.13) ───────────────────────────────
+
+    #[test]
+    fn validate_keyid_domain_same_host_ok() {
+        assert!(validate_keyid_domain(
+            "https://mastodon.social/users/alice#main-key",
+            "https://mastodon.social/users/alice"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_keyid_domain_cross_domain_rejected() {
+        let err = validate_keyid_domain(
+            "https://mastodon.social/users/alice#main-key",
+            "https://evil.example.com/users/alice",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("mastodon.social") && err.contains("evil.example.com"),
+            "error must name both hosts: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_keyid_domain_fragment_stripped_ok() {
+        // actor_url == key_id with fragment stripped — must pass.
+        assert!(validate_keyid_domain(
+            "https://example.com/users/bob#main-key",
+            "https://example.com/users/bob"
+        )
+        .is_ok());
+    }
+
+    // ── build_signed_string digest required (stoa-ftx6h.8) ──────────────────
+
+    #[test]
+    fn build_signed_string_digest_absent_is_error() {
+        use axum::http::HeaderMap;
+        let headers = HeaderMap::new(); // no Digest header
+        let err = build_signed_string(
+            "POST",
+            "/inbox",
+            &headers,
+            b"hello body",
+            "(request-target) host date digest",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Digest header required"),
+            "absent Digest header must be an error: {err}"
+        );
+    }
+
+    #[test]
+    fn build_signed_string_digest_present_and_correct() {
+        use axum::http::{HeaderMap, HeaderValue};
+        use data_encoding::BASE64;
+        use sha2::{Digest as _, Sha256};
+
+        let body = b"hello body";
+        let hash = Sha256::digest(body);
+        let digest_val = format!("SHA-256={}", BASE64.encode(&hash));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("example.com"));
+        headers.insert("date", HeaderValue::from_static("Mon, 01 Jan 2024 00:00:00 GMT"));
+        headers.insert(
+            "digest",
+            HeaderValue::from_str(&digest_val).unwrap(),
+        );
+
+        let result = build_signed_string(
+            "POST",
+            "/inbox",
+            &headers,
+            body,
+            "(request-target) host date digest",
+        );
+        assert!(result.is_ok(), "correct Digest header must be accepted: {result:?}");
+        let signed = result.unwrap();
+        assert!(signed.contains("digest: SHA-256="));
+    }
+
+    #[test]
+    fn build_signed_string_digest_mismatch_is_error() {
+        use axum::http::{HeaderMap, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        headers.insert("digest", HeaderValue::from_static("SHA-256=AAAA"));
+
+        let err = build_signed_string(
+            "POST",
+            "/inbox",
+            &headers,
+            b"hello body",
+            "(request-target) host date digest",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Digest mismatch"),
+            "wrong Digest header must be an error: {err}"
         );
     }
 }
