@@ -856,9 +856,18 @@ async fn main() {
     let hlc = {
         let clock = match load_hlc_checkpoint(&transit_pool).await {
             Ok(Some(checkpoint)) => {
+                if checkpoint.node_id != [0u8; 8] && checkpoint.node_id != node_id {
+                    warn!(
+                        checkpoint_node_id = hex::encode(checkpoint.node_id),
+                        instance_node_id   = hex::encode(node_id),
+                        "HLC checkpoint node_id differs from current instance node_id; \
+                         node identity may have changed since last run"
+                    );
+                }
                 info!(
                     wall_ms = checkpoint.wall_ms,
                     logical = checkpoint.logical,
+                    node_id = hex::encode(checkpoint.node_id),
                     "loaded HLC checkpoint"
                 );
                 HlcClock::new_seeded(node_id, now_ms, checkpoint)

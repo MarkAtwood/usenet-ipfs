@@ -74,9 +74,8 @@ impl PathGuard {
 impl Drop for PathGuard {
     fn drop(&mut self) {
         if let Some(ref p) = self.path {
-            if let Ok(mut set) = open_paths().lock() {
-                set.remove(p);
-            }
+            let mut set = open_paths().lock().unwrap_or_else(|e| e.into_inner());
+            set.remove(p);
         }
     }
 }
@@ -135,9 +134,8 @@ pub struct LmdbBlockDb {
 
 impl Drop for LmdbBlockDb {
     fn drop(&mut self) {
-        if let Ok(mut set) = open_paths().lock() {
-            set.remove(&self.canonical_path);
-        }
+        let mut set = open_paths().lock().unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.canonical_path);
     }
 }
 
@@ -182,9 +180,7 @@ impl LmdbBlockDb {
         // OPEN_PATHS consistent — without the guard, a failed EnvOpenOptions::open
         // or write_txn/commit would permanently lock the path and prevent retries.
         let mut guard = {
-            let mut set = open_paths()
-                .lock()
-                .map_err(|_| LmdbError::Other("OPEN_PATHS lock poisoned".into()))?;
+            let mut set = open_paths().lock().unwrap_or_else(|e| e.into_inner());
             if !set.insert(canonical.clone()) {
                 return Err(LmdbError::Other(format!(
                     "LMDB environment at {} is already open in this process; \

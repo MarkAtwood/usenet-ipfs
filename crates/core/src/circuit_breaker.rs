@@ -106,7 +106,7 @@ impl CircuitBreaker {
 
     /// Returns the current observable state.
     pub fn state(&self) -> CbState {
-        self.inner.lock().unwrap().state
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).state
     }
 
     /// Returns `true` if a request should be allowed through to the dependency.
@@ -115,7 +115,7 @@ impl CircuitBreaker {
     /// - `Open` → true only if the probe interval has elapsed (transitions to `HalfOpen`).
     /// - `HalfOpen` → true (all requests treated as probes).
     pub fn allow_request(&self) -> bool {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match g.state {
             CbState::Closed => true,
             CbState::Open => {
@@ -137,7 +137,7 @@ impl CircuitBreaker {
 
     /// Record a successful call. If in `HalfOpen`, closes the circuit.
     pub fn record_success(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.state == CbState::HalfOpen {
             let old = g.state;
             g.state = CbState::Closed;
@@ -157,7 +157,7 @@ impl CircuitBreaker {
     /// Record a failed call. If in `HalfOpen`, re-opens. If in `Closed` and
     /// the failure threshold is reached within the window, opens the circuit.
     pub fn record_failure(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match g.state {
             CbState::HalfOpen => {
                 let old = g.state;
