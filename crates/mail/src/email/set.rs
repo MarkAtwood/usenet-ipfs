@@ -12,7 +12,12 @@ use stoa_reader::post::ipfs_write::{write_article_to_ipfs, IpfsBlockStore};
 use stoa_smtp::SmtpRelayQueue;
 
 /// Handle Email/set — route to destroy/update/create sub-handlers.
-pub fn handle_email_set(args: Value) -> Result<Value, MethodError> {
+///
+/// `old_state` is the current `Email` state string fetched before this call.
+/// It is embedded in the response so the correct value is present even if an
+/// early return path bypasses the caller's state-patching logic.  The caller
+/// is still responsible for updating `newState` if any writes succeed.
+pub fn handle_email_set(args: Value, old_state: &str) -> Result<Value, MethodError> {
     let mut not_destroyed: serde_json::Map<String, Value> = serde_json::Map::new();
     let mut not_updated: serde_json::Map<String, Value> = serde_json::Map::new();
 
@@ -48,8 +53,8 @@ pub fn handle_email_set(args: Value) -> Result<Value, MethodError> {
 
     Ok(json!({
         "accountId": args.get("accountId").cloned().unwrap_or(Value::Null),
-        "oldState": "0",
-        "newState": "0",
+        "oldState": old_state,
+        "newState": old_state,
         "created": null,
         "updated": null,
         "destroyed": null,
@@ -338,12 +343,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_state_embedded_in_response() {
+        // RFC 8621 §4.3: oldState must reflect the state at the time of the
+        // call, even for responses with no changes.
+        let args = json!({"accountId": "acc1"});
+        let result = handle_email_set(args, "42").unwrap();
+        assert_eq!(
+            result["oldState"].as_str(),
+            Some("42"),
+            "oldState must be the value passed in, not hardcoded '0'"
+        );
+        assert_eq!(
+            result["newState"].as_str(),
+            Some("42"),
+            "newState starts equal to oldState before caller applies any bump"
+        );
+    }
+
+    #[test]
     fn destroy_returns_not_permitted() {
         let args = json!({
             "accountId": "acc1",
             "destroy": ["cid1", "cid2"]
         });
-        let result = handle_email_set(args).unwrap();
+        let result = handle_email_set(args, "0").unwrap();
         let not_destroyed = result["notDestroyed"].as_object().unwrap();
         assert!(not_destroyed.contains_key("cid1"));
         assert!(not_destroyed.contains_key("cid2"));
@@ -360,7 +383,7 @@ mod tests {
                 }
             }
         });
-        let result = handle_email_set(args).unwrap();
+        let result = handle_email_set(args, "0").unwrap();
         let not_updated = result["notUpdated"].as_object().unwrap();
         assert!(not_updated.contains_key("somecid"));
         assert_eq!(not_updated["somecid"]["type"], "notPermitted");
@@ -376,7 +399,7 @@ mod tests {
                 }
             }
         });
-        let result = handle_email_set(args).unwrap();
+        let result = handle_email_set(args, "0").unwrap();
         // notUpdated should be null since keywords-only is allowed
         assert!(result["notUpdated"].is_null());
     }

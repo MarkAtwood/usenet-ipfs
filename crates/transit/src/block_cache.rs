@@ -183,12 +183,21 @@ impl BlockCache {
             ))
         })?;
 
-        // Insert the DB row first.  If the file write subsequently fails we
-        // delete the row; a DB row with a missing file is a cache miss
-        // (recoverable), whereas a file with no DB row is an orphan that leaks
-        // disk space indefinitely.
+        // Write the file first, then insert the DB row.
+        //
+        // The previous order (INSERT then write) had a TOCTOU window: a
+        // concurrent get_raw could find the DB row before the file existed,
+        // producing a misleading I/O error instead of a cache miss.
+        //
+        // With the new order: if the file write fails, nothing is in the DB
+        // (no cleanup needed).  If the DB INSERT fails after a successful file
+        // write, we delete the file to avoid orphan disk usage.
+        if let Err(e) = fs::write(&file_path, bytes).await {
+            return Err(CacheError::Io(e));
+        }
+
         let now = unix_millis();
-        sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO transit_block_cache \
              (cid, file_path, byte_size, last_access) VALUES (?, ?, ?, ?) \
              ON CONFLICT (cid) DO NOTHING",
@@ -198,15 +207,11 @@ impl BlockCache {
         .bind(bytes.len() as i64)
         .bind(now)
         .execute(&*self.pool)
-        .await?;
-
-        if let Err(e) = fs::write(&file_path, bytes).await {
-            // Clean up the DB row so we don't advertise a file that doesn't exist.
-            let _ = sqlx::query("DELETE FROM transit_block_cache WHERE cid = ?")
-                .bind(&cid_str)
-                .execute(&*self.pool)
-                .await;
-            return Err(CacheError::Io(e));
+        .await
+        {
+            // Clean up the file so it does not leak disk space.
+            let _ = fs::remove_file(&file_path).await;
+            return Err(CacheError::Db(e));
         }
 
         Ok(())

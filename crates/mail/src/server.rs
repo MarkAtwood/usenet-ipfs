@@ -1038,7 +1038,7 @@ async fn route_method(
                 .await
                 .unwrap_or_else(|_| "0".to_string());
 
-            let mut result = match crate::email::set::handle_email_set(args.clone()) {
+            let mut result = match crate::email::set::handle_email_set(args.clone(), &old_state) {
                 Ok(v) => v,
                 Err(e) => return serde_json::to_value(&e).unwrap_or(json!({})),
             };
