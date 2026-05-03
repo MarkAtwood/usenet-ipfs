@@ -419,8 +419,9 @@ impl SmtpRelayQueue {
     /// Move `msg_path` and `env_path` to the `dead/` subdirectory.
     ///
     /// `.msg` is moved first so that if the `.env` rename fails, the orphaned
-    /// `.env` is still visible to `drain_once` — it will warn "msg missing,
-    /// skipping" rather than permanently strand the `.msg`.
+    /// `.env` is still visible to `drain_once` — on the next drain cycle it
+    /// logs "orphaned .env (no matching .msg), removing" and deletes it,
+    /// rather than permanently stranding the `.msg` in the pending queue.
     async fn move_to_dead_letter(&self, msg_path: &std::path::Path, env_path: &std::path::Path) {
         let dead_dir = &self.dead_dir;
         for path in [msg_path, env_path] {

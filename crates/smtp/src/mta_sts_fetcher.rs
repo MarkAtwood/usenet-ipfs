@@ -35,6 +35,7 @@ pub async fn fetch_mta_sts_policy_body(
     // would allow SSRF if smuggled into https://mta-sts.<domain>/...
     if domain.is_empty()
         || domain.contains("://")
+        || domain.contains(':')
         || domain.contains('/')
         || domain.contains('@')
         || domain.contains('#')
@@ -189,6 +190,20 @@ mod tests {
         let err = fetch_mta_sts_policy_body(&test_client(), "example.com[evil]", 5_000, 65_536)
             .await
             .expect_err("domain with [ must fail");
+        assert!(matches!(err, MtaStsError::PolicyFetchFailed { .. }));
+    }
+
+    // T4e: domain containing ":" is rejected.
+    // Oracle: RFC 3986 §3.2.3 treats ":" as the port delimiter in the authority
+    // component; "evil.com:8080" would construct
+    // "https://mta-sts.evil.com:8080/.well-known/mta-sts.txt", connecting to a
+    // non-standard HTTPS port which may bypass network-level MTA-STS filtering.
+    // A valid DNS hostname label must not contain ":".
+    #[tokio::test]
+    async fn domain_with_port_rejected() {
+        let err = fetch_mta_sts_policy_body(&test_client(), "evil.com:8080", 5_000, 65_536)
+            .await
+            .expect_err("domain with : must fail");
         assert!(matches!(err, MtaStsError::PolicyFetchFailed { .. }));
     }
 

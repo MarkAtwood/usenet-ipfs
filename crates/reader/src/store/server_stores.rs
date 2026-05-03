@@ -435,6 +435,11 @@ async fn build_smtp_relay_queue(
         ) {
             Ok(e) => {
                 tracing::info!("MTA-STS outbound enforcement enabled");
+                // NOTE: e.tlsrpt_recorder() is intentionally not retrieved here.
+                // The TlsrptRecorder accumulates per-domain TLS failure data for
+                // RFC 8460 reporting, but the report generation and submission path
+                // (periodic SMTP/HTTPS reports to domain owners) is not yet
+                // implemented.  Tracked in stoa-2xeks.29.1.
                 Some(Arc::new(e))
             }
             Err(e) => {

@@ -54,6 +54,8 @@ struct CachedStsEntry {
     /// When the DNS TXT `id=` was last verified against the live record.
     /// Throttles re-checks to at most once per [`ID_CHECK_INTERVAL`].
     last_id_check: Instant,
+    /// When this cache entry expires (derived from the policy `max_age`).
+    valid_until: Instant,
 }
 
 /// In-memory MTA-STS policy cache and enforcement for outbound relay.
@@ -76,7 +78,7 @@ struct CachedStsEntry {
 pub struct MtaStsEnforcer {
     resolver: TokioResolver,
     http_client: reqwest::Client,
-    cache: Mutex<HashMap<String, (CachedStsEntry, Instant)>>,
+    cache: Mutex<HashMap<String, CachedStsEntry>>,
     fetch_timeout_ms: u64,
     max_body_bytes: usize,
     tlsrpt: Arc<TlsrptRecorder>,
@@ -124,11 +126,15 @@ impl MtaStsEnforcer {
         // before any .await point.  Do not hold the guard across an await —
         // that would deadlock a Tokio worker thread.
         let cached = {
-            let guard = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+            let mut guard = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+            // Opportunistic eviction: purge entries whose TTL has expired to bound
+            // memory use (the cache otherwise grows without bound for long-lived
+            // processes delivering to many distinct domains).
+            let now = Instant::now();
+            guard.retain(|_, entry| now < entry.valid_until);
             guard
                 .get(rcpt_domain)
-                .filter(|(_, valid_until)| Instant::now() < *valid_until)
-                .map(|(entry, _)| {
+                .map(|entry| {
                     (
                         entry.policy_id.clone(),
                         entry.mode, // MtaStsMode is Copy
@@ -163,7 +169,7 @@ impl MtaStsEnforcer {
                         // timestamp so we don't retry again immediately.
                         _ => {
                             // NOTE: guard dropped immediately.
-                            if let Some((entry, _)) = self
+                            if let Some(entry) = self
                                 .cache
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
@@ -279,12 +285,13 @@ impl MtaStsEnforcer {
             mode: policy.mode, // MtaStsMode is Copy
             mx_patterns: mx_arc.clone(),
             last_id_check: Instant::now(),
+            valid_until,
         };
         // NOTE: guard dropped immediately after insert — no await follows.
         self.cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(rcpt_domain.to_owned(), (entry, valid_until));
+            .insert(rcpt_domain.to_owned(), entry);
 
         Some((policy.mode, mx_arc))
     }
@@ -313,11 +320,12 @@ impl MtaStsEnforcer {
             mode,
             mx_patterns: Arc::new(mx_patterns),
             last_id_check: Instant::now(),
+            valid_until,
         };
         self.cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(domain.to_owned(), (entry, valid_until));
+            .insert(domain.to_owned(), entry);
     }
 }
 
@@ -435,7 +443,7 @@ pub async fn deliver_via_relay(
 
 /// Extract the domain part of an email address.
 fn recipient_domain(addr: &str) -> Option<&str> {
-    addr.rfind('@').map(|i| &addr[i + 1..])
+    addr.rsplit_once('@').map(|(_, domain)| domain)
 }
 
 async fn do_deliver(
@@ -705,7 +713,7 @@ async fn run_smtp_session(
         }
     }
 
-    // 4. MAIL FROM
+    // 5. MAIL FROM
     // Validate the address before interpolating it into MAIL FROM:<...>.
     // Angle brackets are not valid inside an RFC 5321 mailbox address; their
     // presence would prematurely close the angle-bracket argument and allow
@@ -736,7 +744,7 @@ async fn run_smtp_session(
     let (code, _cont, _text) = parse_smtp_line(&line)?;
     check_250(code, &line, "MAIL FROM")?;
 
-    // 5. RCPT TO (one per recipient)
+    // 6. RCPT TO (one per recipient)
     for addr in &envelope.rcpt_to {
         // Validate address before interpolating into RCPT TO:<...>.
         // '<' and '>' are not valid in RFC 5321 mailbox addresses; their
@@ -760,7 +768,7 @@ async fn run_smtp_session(
         check_250(code, &line, "RCPT TO")?;
     }
 
-    // 6. DATA
+    // 7. DATA
     writer
         .write_all(b"DATA\r\n")
         .await
@@ -785,7 +793,7 @@ async fn run_smtp_session(
         }
     }
 
-    // 7. Dot-stuffed article body + terminator.
+    // 8. Dot-stuffed article body + terminator.
     // RFC 5321 §4.5.2 dot-stuffing is byte-for-byte identical to RFC 3977 §3.1.1
     // NNTP dot-stuffing: prefix every line that begins with '.' with an extra '.'.
     let stuffed = nntp_dot_stuff(article_bytes);
@@ -802,13 +810,13 @@ async fn run_smtp_session(
         .map_err(SmtpRelayError::Io)?;
     writer.flush().await.map_err(SmtpRelayError::Io)?;
 
-    // 8. Read acceptance response.
+    // 9. Read acceptance response.
     line.clear();
     read_line(reader, &mut line).await?;
     let (code, _cont, _text) = parse_smtp_line(&line)?;
     check_250(code, &line, "DATA body")?;
 
-    // 9. QUIT (best-effort).
+    // 10. QUIT (best-effort).
     let _ = writer.write_all(b"QUIT\r\n").await;
 
     Ok(())
