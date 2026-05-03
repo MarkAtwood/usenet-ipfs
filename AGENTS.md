@@ -107,6 +107,14 @@ cargo hack check --feature-powerset --depth 2 \
 
 **Confirm scope for multi-file changes.** Before touching more than three files, state which files will change and why.
 
+**Use subagents aggressively.** Spawn `explore` agents for codebase research and `general` agents for multi-step parallel workstreams. Do not do sequentially what can be done in parallel.
+
+## Task Tracking
+
+Use `bd` (beads) for ALL persistent task tracking — do NOT use markdown TODO lists or MEMORY.md files.
+
+The built-in `TodoWrite` tool is acceptable for tracking in-session progress within a single conversation turn, but Beads is the source of truth across sessions. Run `bd prime` for detailed command reference.
+
 ## Session Completion
 
 **Mandatory sequence** when ending a session:

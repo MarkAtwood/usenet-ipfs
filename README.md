@@ -1,28 +1,28 @@
 # stoa
 
-A self-hosted unified messaging server that speaks NNTP, SMTP, JMAP, and IMAP over a shared content-addressed block store. Every message — whether posted via a newsreader, submitted by email, or injected by a peer — is stored as a CIDv1 SHA-256 IPFS block, operator-signed with Ed25519, and indexed in a per-group Merkle-CRDT log. Standard clients work without modification.
+A self-hosted email and messaging server backed by a content-addressed block store. Every message — whether submitted by email, posted via a newsreader, or injected by a peer — is stored as a CIDv1 SHA-256 DAG-CBOR block, operator-signed with Ed25519, and indexed in a per-group Merkle-CRDT log. Standard clients work without modification.
 
 ## Protocols
 
 | Protocol | RFC | Daemon | Status |
 |---|---|---|---|
-| NNTP (Usenet newsreader) | RFC 3977, RFC 4644 | `stoa-reader` | Complete |
 | SMTP (submission + relay) | RFC 5321, RFC 6409 | `stoa-smtp` | Complete |
 | JMAP (modern email API) | RFC 8620, RFC 8621 | `stoa-mail` | Substantially complete |
 | IMAP | RFC 3501, RFC 9051 | `stoa-imap` | In progress |
+| NNTP (Usenet newsreader) | RFC 3977, RFC 4644 | `stoa-reader` | Complete |
 
-All four daemons read from and write to the same block store. A message posted via NNTP is immediately visible via JMAP. An email submitted over SMTP can be routed into a newsgroup via Sieve `fileinto`. The canonical identifier for any message is its CID — stable, content-derived, and the same regardless of which protocol or node introduced it.
+All four daemons read from and write to the same block store. An email submitted over SMTP can be routed into a newsgroup via Sieve `fileinto`. A message posted via NNTP is immediately visible via JMAP. The canonical identifier for any message is its CID — stable, content-derived, and the same regardless of which protocol or node introduced it.
 
 ## Why it exists
 
-Traditional Usenet spools are opaque binary blobs. Traditional email stores are per-server silos. Stoa unifies them:
+Traditional email stores are per-server silos. Stoa is different:
 
-- **Content-addressed storage.** Articles are CIDv1 SHA-256 DAG-CBOR blocks. The CID is a cryptographic commitment to the content — you can verify any article without trusting the server that gave it to you.
-- **Tamper-evident.** Every article is Ed25519-signed by the receiving operator at ingest before it touches the store. Forging or silently altering an article breaks the signature.
-- **Eventual consistency without coordination.** Group state is a Merkle-CRDT append-only log. Peers exchange articles via IHAVE/TAKETHIS (RFC 4644). Partitions heal automatically; no quorum is required to make progress.
+- **Content-addressed storage.** Messages are stored as CIDv1 SHA-256 DAG-CBOR blocks. The CID is a cryptographic commitment to the content — you can verify any message without trusting the server that gave it to you.
+- **Tamper-evident.** Every message is Ed25519-signed by the receiving operator at ingest before it touches the store. Forging or silently altering a message breaks the signature.
+- **Eventual consistency without coordination.** Group state is a Merkle-CRDT append-only log. Peers exchange messages via IHAVE/TAKETHIS (RFC 4644). Partitions heal automatically; no quorum is required to make progress.
 - **Horizontal scaling from the storage model.** Because the store is content-addressed, any number of reader daemons can point at the same shared backend (S3, GCS, Azure Blob, Ceph RADOS, or any other supported store) and serve identical, verified content. There is no primary, no replication lag, and no split-brain — two readers backed by the same object store are identical by definition. Scale out by adding reader instances; the block store is the coordination layer.
-- **Standard clients, no plugins.** `slrn`, `tin`, `pan`, `gnus`, Thunderbird over NNTP; Fastmail, Thunderbird, iOS Mail over JMAP; any IMAP client over IMAP. No client modifications required.
-- **Self-hostable with no required external services.** The default LMDB backend has zero external dependencies. A full NNTP server runs from a single binary and a config file.
+- **Standard clients, no plugins.** Fastmail, Thunderbird, iOS Mail over JMAP; any IMAP client over IMAP; `slrn`, `tin`, `pan`, `gnus`, Thunderbird over NNTP. No client modifications required.
+- **Self-hostable with no required external services.** The default LMDB backend has zero external dependencies. A full server runs from a single binary and a config file.
 
 ## Quick start
 
@@ -37,30 +37,32 @@ cargo build --release
 # Generate an operator signing key
 target/release/stoa-ctl keygen --out /etc/stoa/operator.key
 
-# Run transit (peering + store) and reader (NNTP)
+# Run transit (peering + store), SMTP, and JMAP
 target/release/stoa-transit --config /etc/stoa/transit.toml
-target/release/stoa-reader  --config /etc/stoa/reader.toml
+target/release/stoa-smtp    --config /etc/stoa/smtp.toml
+target/release/stoa-mail    --config /etc/stoa/mail.toml
 
-# Connect any RFC 3977 newsreader to localhost:119
+# Optionally run the NNTP reader for newsreader clients
+target/release/stoa-reader  --config /etc/stoa/reader.toml
 ```
 
-For email access, also run `stoa-smtp` and `stoa-mail`. For the complete deployment reference — TLS, auth, peering, GC policy, JMAP client setup — see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+For the complete deployment reference — TLS, auth, peering, GC policy, JMAP client setup — see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## How it works
 
-### Article storage model
+### Message storage model
 
-Every article is stored as a DAG-CBOR IPLD tree rooted at an `ArticleRootNode` (codec `0x71`, CIDv1 SHA-256). The root node links to separate raw blocks for the verbatim RFC 5536 headers, a lowercased/decoded header map, the body, and an optional MIME parse tree. Inline metadata on the root includes the Message-ID, group list, HLC timestamp, operator Ed25519 signature, and byte/line counts.
+Every message is stored as a DAG-CBOR IPLD tree (codec `0x71`, CIDv1 SHA-256). No IPFS daemon is required — DAG-CBOR is just a serialisation format; the default backend is LMDB. The root node links to separate raw blocks for the verbatim headers, a lowercased/decoded header map, the body, and an optional MIME parse tree. Inline metadata on the root includes the Message-ID, group list, HLC timestamp, operator Ed25519 signature, and byte/line counts.
 
 ```
-ArticleRootNode  ─── header_cid      →  raw block (RFC 5536 headers)
-  (CIDv1 0x71)  ─── header_map_cid  →  DAG-CBOR (lowercase, RFC 2047 decoded)
-                ─── body_cid        →  raw block (article body)
-                ─── mime_cid        →  MIME parse tree (optional)
-                └── metadata        →  inline (message_id, hlc, ed25519 sig, …)
+root node        ─── header_cid      →  raw block (message headers)
+(CIDv1 0x71)     ─── header_map_cid  →  DAG-CBOR (lowercase, RFC 2047 decoded)
+                 ─── body_cid        →  raw block (message body)
+                 ─── mime_cid        →  MIME parse tree (optional)
+                 └── metadata        →  inline (message_id, hlc, ed25519 sig, …)
 ```
 
-The article CID is the same regardless of which backend stores it, which peer introduced it, or which protocol delivered it. JMAP uses article CIDs directly as `Email` IDs and blob IDs. The NNTP `XCID` and `XVERIFY` commands expose CIDs to CID-aware clients; standard clients see only normal article numbers and message IDs.
+The CID is the same regardless of which backend stores it, which peer introduced it, or which protocol delivered it. JMAP uses CIDs directly as `Email` IDs and blob IDs. For NNTP clients, the `XCID` and `XVERIFY` commands expose CIDs to CID-aware clients; standard newsreaders see only normal article numbers and message IDs.
 
 ### Horizontal scaling
 
@@ -100,11 +102,11 @@ Transit daemons peer over direct TCP connections using the NNTP transit protocol
 All four daemons share the same block store and SQLite databases:
 
 ```
-newsreader clients (slrn, tin, Thunderbird …)
-        │ NNTP :119 / NNTPS :563
-        ▼
+  email clients (Fastmail, Thunderbird, iOS Mail …)
+          │ JMAP HTTP
+          ▼
   ┌─────────────┐     ┌───────────────────────────────┐
-  │ stoa-reader │────►│                               │
+  │ stoa-mail   │────►│                               │
   └─────────────┘     │  shared block store           │
                       │  (LMDB / S3 / GCS / RADOS …)  │
   ┌─────────────┐     │                               │
@@ -113,8 +115,8 @@ newsreader clients (slrn, tin, Thunderbird …)
   └─────────────┘     │    overview index,            │
                       │    article numbers)           │
   ┌─────────────┐     │                               │
-  │ stoa-mail   │────►│                               │
-  │ JMAP HTTP   │     └───────────────────────────────┘
+  │ stoa-imap   │────►│                               │
+  │ :143/:993   │     └───────────────────────────────┘
   └─────────────┘               ▲
                                 │ IHAVE/TAKETHIS
   ┌─────────────┐               │ (TCP peering)
@@ -122,23 +124,30 @@ newsreader clients (slrn, tin, Thunderbird …)
   │ peering +   │◄──── other transit nodes
   │ store-fwd   │
   └─────────────┘
+
+  newsreader clients (slrn, tin, Thunderbird …)
+          │ NNTP :119 / NNTPS :563
+          ▼
+  ┌─────────────┐
+  │ stoa-reader │────► (same shared block store)
+  └─────────────┘
 ```
 
-SMTP→NNTP bridge: email submitted to `stoa-smtp` is evaluated by a native Sieve engine. A `fileinto("newsgroup:comp.lang.rust")` action routes the message into the NNTP store. JMAP Email IDs are article CIDs; thread IDs are the CID of the thread root. Newsgroups appear as JMAP mailboxes.
+SMTP→groups bridge: email submitted to `stoa-smtp` is evaluated by a native Sieve engine. A `fileinto("newsgroup:comp.lang.rust")` action routes the message into the group store. JMAP Email IDs are message CIDs; thread IDs are the CID of the thread root. Groups appear as JMAP mailboxes.
 
-### Synthetic article numbers
+### Synthetic article numbers (NNTP)
 
-NNTP article numbers are local and sequential per `(group, reader-instance)` — stored in SQLite, assigned with `SELECT MAX(n)+1`. They are never network-stable; do not use them as persistent identifiers. The stable identifiers are Message-ID (human-readable, RFC 5536) and CID (cryptographic, globally unique).
+NNTP article numbers are local and sequential per `(group, reader-instance)` — stored in SQLite, assigned with `SELECT MAX(n)+1`. They are never network-stable; do not use them as persistent identifiers. The stable identifiers are Message-ID (human-readable) and CID (cryptographic, globally unique).
 
 ### Sieve filtering (SMTP)
 
-`stoa-smtp` evaluates Sieve scripts (RFC 5228) using a native MIT-licensed Sieve engine (`stoa-sieve-native`). The AGPL dependency (`sieve-rs`) is used only as a test oracle and is never linked into production binaries — enforced at the Cargo dependency level (ADR-0010).
+`stoa-smtp` evaluates Sieve scripts (RFC 5228) using `stoa-sieve-native`, a native Sieve engine built into the server.
 
 Supported actions: `fileinto` (into a mailbox or `newsgroup:X`), `keep`, `discard`, `reject`, `redirect`. Outbound relay includes Ed25519 DKIM signing (RFC 8463) and MTA-STS enforcement (RFC 8461).
 
 ## Block store backends
 
-Both `stoa-transit` and `stoa-reader` select a backend via `[backend] type = "..."` in their config files. All backends implement the same `IpfsStore` trait; switching backends requires only a config change and a reindex.
+Both `stoa-transit` and `stoa-reader` select a backend via `[backend] type = "..."` in their config files. All backends implement the same block store interface; switching backends requires only a config change and a reindex.
 
 | Backend | `type` | Notes |
 |---|---|---|
@@ -173,8 +182,7 @@ stoa/
 │   ├── auth/                     OIDC, client cert, bcrypt credential store
 │   ├── tls/                      shared rustls configuration
 │   ├── lmdb/                     LMDB FFI boundary (only crate with unsafe)
-│   ├── sieve/                    sieve-rs wrapper (AGPL, test oracle only)
-│   ├── sieve-native/             native MIT Sieve evaluator (production)
+│   ├── sieve-native/             Sieve evaluator (production)
 │   ├── verify/                   DKIM + X-Stoa-Sig verification
 │   ├── ctl/                      operator CLI (stoa-ctl)
 │   └── integration-tests/        end-to-end test harness
@@ -222,4 +230,4 @@ Issue tracker: Beads. Run `bd ready` for available work. All non-trivial changes
 
 ## License
 
-MIT — except `stoa-sieve` (AGPL-3.0-only, never linked by production binaries).
+MIT.
