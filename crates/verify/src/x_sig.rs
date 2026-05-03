@@ -327,4 +327,55 @@ mod tests {
             Some(pubkey_hex_id(&key_b.verifying_key()))
         );
     }
+
+    /// Independent oracle: signature computed by Python `cryptography` library.
+    ///
+    /// Test vector generated with:
+    /// ```python
+    /// from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    /// import base64
+    /// key = Ed25519PrivateKey.from_private_bytes(bytes([0x42] * 32))
+    /// msg = b"From: test@example.com\r\nSubject: Test\r\n\r\nBody.\r\n"
+    /// sig = key.sign(msg)
+    /// base64.urlsafe_b64encode(sig).rstrip(b'=').decode()
+    /// # => '7bQmP8369jPqINGUCn6JerQhzjXefPbLowYe6ob4zvNwbGap2dyAjh2kZJ4f-EkeK1m9Z8yv6a5Ooz2y3RIVAg'
+    /// ```
+    ///
+    /// The signed bytes are the article WITHOUT the X-Stoa-Sig header line.
+    /// The sig header is inserted manually — `sign_article` is NOT used, so this
+    /// test exercises `extract_sig_header` excision against a known-good external
+    /// signature rather than a self-referential round-trip.
+    #[test]
+    fn external_oracle_python_sig_verifies() {
+        // Public key for seed [0x42; 32], cross-checked against Python output:
+        // key.public_key().public_bytes(Raw, Raw).hex()
+        // => "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        let signing_key = SigningKey::from_bytes(&[0x42u8; 32]);
+        let pubkey = signing_key.verifying_key();
+        assert_eq!(
+            hex::encode(pubkey.as_bytes()),
+            "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+            "Rust pubkey must match Python-derived pubkey for seed [0x42;32]"
+        );
+
+        // Article with sig header inserted between Subject and blank line.
+        // The sig value was computed by Python over the bytes WITHOUT this header.
+        let article_with_sig = concat!(
+            "From: test@example.com\r\n",
+            "Subject: Test\r\n",
+            "X-Stoa-Sig: 7bQmP8369jPqINGUCn6JerQhzjXefPbLowYe6ob4zvNwbGap2dyAjh2kZJ4f",
+            "-EkeK1m9Z8yv6a5Ooz2y3RIVAg\r\n",
+            "\r\n",
+            "Body.\r\n",
+        );
+
+        let results = verify_x_sig(&[pubkey], article_with_sig.as_bytes());
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].result.is_pass(),
+            "Python-generated sig must verify; extract_sig_header must excise exactly \
+             the sig header line. Got: {:?}",
+            results[0].result
+        );
+    }
 }
