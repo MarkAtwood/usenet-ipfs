@@ -67,9 +67,26 @@ pub async fn lookup_mta_sts_txt(
 
     let record_text = sts_records[0];
 
-    // Parse key=value pairs split on "; " per RFC 8461 §3.1.
+    parse_sts_record(record_text)
+}
+
+/// Parse a single `_mta-sts` TXT record string (already confirmed to be an STSv1 record).
+///
+/// Returns `Ok(None)` when the first tag is not `v=STSv1`.
+/// Returns `Ok(Some(record))` on success, or `Err` for any validation failure.
+fn parse_sts_record(text: &str) -> Result<Option<MtaStsTxtRecord>, MtaStsError> {
+    // RFC 8461 §3.1: first tag MUST be v=STSv1.
+    if text
+        .split(';')
+        .next()
+        .map(|t| t.trim() != "v=STSv1")
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+
     let mut policy_id: Option<String> = None;
-    for pair in record_text.split(';') {
+    for pair in text.split(';') {
         let pair = pair.trim();
         if let Some(value) = pair.strip_prefix("id=") {
             policy_id = Some(value.trim().to_owned());
@@ -83,7 +100,6 @@ pub async fn lookup_mta_sts_txt(
         }
     };
 
-    // RFC 8461 §3.1: id MUST be 1–32 alphanumeric characters.
     if id.is_empty() {
         return Err(MtaStsError::DnsTxtMissingId);
     }
@@ -102,50 +118,6 @@ pub async fn lookup_mta_sts_txt(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Unit-testable parsing logic extracted from lookup_mta_sts_txt.
-    // These tests do not perform DNS lookups.
-
-    fn parse_sts_record(text: &str) -> Result<Option<MtaStsTxtRecord>, MtaStsError> {
-        // RFC 8461 §3.1: first tag MUST be v=STSv1.
-        if text
-            .split(';')
-            .next()
-            .map(|t| t.trim() != "v=STSv1")
-            .unwrap_or(true)
-        {
-            return Ok(None);
-        }
-
-        let mut policy_id: Option<String> = None;
-        for pair in text.split(';') {
-            let pair = pair.trim();
-            if let Some(value) = pair.strip_prefix("id=") {
-                policy_id = Some(value.trim().to_owned());
-            }
-        }
-
-        let id = match policy_id {
-            Some(id) => id,
-            None => {
-                return Err(MtaStsError::DnsTxtMissingId);
-            }
-        };
-
-        if id.is_empty() {
-            return Err(MtaStsError::DnsTxtMissingId);
-        }
-
-        if id.len() > 32 {
-            return Err(MtaStsError::DnsTxtIdTooLong);
-        }
-
-        if !id.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(MtaStsError::DnsTxtIdInvalid);
-        }
-
-        Ok(Some(MtaStsTxtRecord { policy_id: id }))
-    }
 
     // T1: well-formed record parses correctly.
     // Oracle: RFC 8461 §3.1 example — "v=STSv1; id=20160831085700Z"

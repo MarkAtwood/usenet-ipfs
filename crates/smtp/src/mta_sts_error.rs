@@ -24,8 +24,6 @@ pub enum MtaStsError {
     PolicyFetchTooLarge,
     /// Policy file body failed to parse (missing field, bad value, oversized body).
     PolicyParseFailed { message: String },
-    /// Cached policy_id does not match the current DNS TXT record id.
-    PolicyIdMismatch { cached: String, dns: String },
     /// Connecting MX hostname does not match any pattern in the policy.
     MxNotMatched { mx: String },
 }
@@ -63,9 +61,6 @@ impl fmt::Display for MtaStsError {
             }
             MtaStsError::PolicyParseFailed { message } => {
                 write!(f, "policy parse error: {}", message)
-            }
-            MtaStsError::PolicyIdMismatch { cached, dns } => {
-                write!(f, "policy id mismatch (cached={}, dns={})", cached, dns)
             }
             MtaStsError::MxNotMatched { mx } => {
                 write!(f, "MX hostname '{}' not in policy", mx)

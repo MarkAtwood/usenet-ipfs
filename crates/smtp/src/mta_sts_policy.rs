@@ -44,9 +44,9 @@ pub fn parse_mta_sts_policy(
         // Key and value are separated by ": " (colon-space).
         // RFC 8461 §3.2: "Each tag-value pair is terminated by a CRLF".
         // Unknown keys are silently ignored.
-        let (key, value) = match line.split_once(": ") {
-            Some(pair) => pair,
-            None => continue, // malformed or unknown — skip per RFC
+        let Some((key, value)) = line.split_once(": ") else {
+            // Malformed or unknown — skip per RFC 8461 §3.2.
+            continue;
         };
         let key = key.trim();
         let value = value.trim();

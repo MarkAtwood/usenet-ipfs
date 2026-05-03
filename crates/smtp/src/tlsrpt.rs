@@ -63,7 +63,7 @@ impl TlsrptRecorder {
         };
         self.records
             .lock()
-            .expect("mutex poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .entry(recipient_domain.to_owned())
             .or_default()
             .push(record);
@@ -71,7 +71,7 @@ impl TlsrptRecorder {
 
     /// Get all accumulated records (for testing / report generation).
     pub fn get_records(&self) -> std::collections::HashMap<String, Vec<TlsrptFailureRecord>> {
-        self.records.lock().expect("mutex poisoned").clone()
+        self.records.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 

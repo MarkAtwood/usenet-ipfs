@@ -9,12 +9,9 @@ pub mod landing;
 pub mod mailbox;
 pub mod metrics;
 pub mod migrations;
-pub mod mta_sts_cache;
 pub mod server;
 pub mod state;
 pub mod thread;
 pub mod tls;
 pub mod token_store;
 pub mod upload;
-
-pub use mta_sts_cache::{CachedMtaStsPolicy, MtaStsCache};

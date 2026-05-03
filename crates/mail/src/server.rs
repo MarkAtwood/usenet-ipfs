@@ -326,6 +326,7 @@ fn build_mta_sts_policy_body(domain_config: &stoa_smtp::config::MtaStsDomainConf
         MtaStsMode::None => "none",
         MtaStsMode::Testing => "testing",
         MtaStsMode::Enforce => "enforce",
+        _ => unreachable!("unknown MtaStsMode variant — update this match when adding variants"),
     };
 
     // RFC 8461 §3.2: policy body MUST use CRLF line endings.

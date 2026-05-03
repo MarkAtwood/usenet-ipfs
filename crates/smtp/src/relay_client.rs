@@ -20,6 +20,7 @@ use crate::mta_sts_fetcher::fetch_mta_sts_policy_body;
 use crate::mta_sts_mx::check_mx_against_policy;
 use crate::mta_sts_policy::parse_mta_sts_policy;
 use crate::relay_error::SmtpRelayError;
+use crate::tlsrpt::{TlsrptFailureType, TlsrptRecorder};
 use stoa_core::util::nntp_dot_stuff;
 
 // ─── MTA-STS enforcement ──────────────────────────────────────────────────────
@@ -78,6 +79,7 @@ pub struct MtaStsEnforcer {
     cache: Mutex<HashMap<String, (CachedStsEntry, Instant)>>,
     fetch_timeout_ms: u64,
     max_body_bytes: usize,
+    tlsrpt: Arc<TlsrptRecorder>,
 }
 
 impl MtaStsEnforcer {
@@ -98,6 +100,7 @@ impl MtaStsEnforcer {
             cache: Mutex::new(HashMap::new()),
             fetch_timeout_ms,
             max_body_bytes,
+            tlsrpt: Arc::new(TlsrptRecorder::new()),
         })
     }
 
@@ -206,11 +209,23 @@ impl MtaStsEnforcer {
             }
             MtaStsMode::Enforce => {
                 if peer_tls == PeerTlsStatus::Plain {
+                    self.tlsrpt.record_failure(
+                        rcpt_domain,
+                        TlsrptFailureType::StarttlsNotSupported,
+                        Some(peer_host),
+                        None,
+                    );
                     return Err(SmtpRelayError::Permanent(format!(
                         "MTA-STS enforce: TLS required for {rcpt_domain} but relay is plaintext"
                     )));
                 }
                 if !check_mx_against_policy(peer_host, &mx_patterns) {
+                    self.tlsrpt.record_failure(
+                        rcpt_domain,
+                        TlsrptFailureType::StsPolicyInvalid,
+                        Some(peer_host),
+                        None,
+                    );
                     return Err(SmtpRelayError::Permanent(format!(
                         "MTA-STS enforce: peer host {peer_host} \
                          does not match MX policy for {rcpt_domain}"
@@ -274,6 +289,14 @@ impl MtaStsEnforcer {
         Some((policy.mode, mx_arc))
     }
 
+    /// Return a clone of the shared TLSRPT recorder for this enforcer.
+    ///
+    /// Callers hold the `Arc` to read accumulated failure records for
+    /// RFC 8460 report generation without requiring a reference to the enforcer.
+    pub fn tlsrpt_recorder(&self) -> Arc<TlsrptRecorder> {
+        self.tlsrpt.clone()
+    }
+
     /// Seed the cache directly (test helper only).
     #[cfg(test)]
     pub fn seed_cache(
@@ -302,6 +325,8 @@ impl MtaStsEnforcer {
 /// type implements both [`AsyncRead`] and [`AsyncWrite`].  Using an enum here
 /// avoids the heap allocation that `Box<dyn AsyncRead + …>` requires.
 #[pin_project(project = TlsOrPlainProj)]
+// TlsStream<TcpStream> is ~8 KiB; TcpStream is ~24 bytes.  An enum here avoids
+// a heap allocation per connection that Box<dyn AsyncRead+AsyncWrite> would require.
 #[allow(clippy::large_enum_variant)]
 enum TlsOrPlain {
     Plain(#[pin] TcpStream),
@@ -761,6 +786,8 @@ async fn run_smtp_session(
     }
 
     // 7. Dot-stuffed article body + terminator.
+    // RFC 5321 §4.5.2 dot-stuffing is byte-for-byte identical to RFC 3977 §3.1.1
+    // NNTP dot-stuffing: prefix every line that begins with '.' with an extra '.'.
     let stuffed = nntp_dot_stuff(article_bytes);
     writer
         .write_all(&stuffed)
