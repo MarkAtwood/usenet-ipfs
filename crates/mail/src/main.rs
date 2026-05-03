@@ -156,10 +156,18 @@ async fn main() {
         base_url: config.listen.base_url.clone(),
         cors: config.cors.clone(),
         slow_jmap_threshold_ms: config.log.slow_jmap_threshold_ms,
-        activitypub_config: config.activitypub,
+        activitypub_config: config.activitypub.clone(),
         activitypub: None,
         mta_sts_domains: Arc::new(config.mta_sts.hosted_domains),
     });
+
+    if config.activitypub.enabled && !config.activitypub.verify_http_signatures {
+        warn!(
+            "ActivityPub HTTP signature verification is DISABLED — \
+             all inbound activities are accepted without authentication. \
+             Set verify_http_signatures = true in [activitypub] for production."
+        );
+    }
 
     let shutdown = async {
         tokio::select! {

@@ -532,25 +532,24 @@ fn stoa_value_to_result(v: Value) -> Result<(Value, Vec<jmap_types::Invocation>)
 
 /// Resolve a username to its numeric `user_id` from the database.
 ///
-/// Returns `Ok(SINGLETON_USER_ID)` when the user is not found — intentional for
-/// the v1 single-user deployment model.  Returns `Err` only on a database failure,
-/// which the caller should surface as 503.
-async fn resolve_user_id(pool: &sqlx::AnyPool, username: &str) -> Result<i64, sqlx::Error> {
+/// - `Ok(Some(id))` — user found.
+/// - `Ok(Some(SINGLETON_USER_ID))` — `username` is `"anonymous"` (unauthenticated
+///   request); singleton fallback is intentional for single-user deployments.
+/// - `Ok(None)` — authenticated user not in the `users` table; caller should
+///   return 403 to prevent cross-user data access.
+/// - `Err` — database error; caller should return 503.
+async fn resolve_user_id(
+    pool: &sqlx::AnyPool,
+    username: &str,
+) -> Result<Option<i64>, sqlx::Error> {
     match sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE username = ?")
         .bind(username)
         .fetch_optional(pool)
         .await?
     {
-        Some(id) => Ok(id),
-        None => {
-            if username != "anonymous" {
-                tracing::warn!(
-                    username = %username,
-                    "JMAP: user not found in users table; falling back to singleton user_id"
-                );
-            }
-            Ok(SINGLETON_USER_ID)
-        }
+        Some(id) => Ok(Some(id)),
+        None if username == "anonymous" => Ok(Some(SINGLETON_USER_ID)),
+        None => Ok(None),
     }
 }
 
@@ -646,7 +645,18 @@ async fn jmap_api_handler(
     let is_operator = state.auth_config.is_operator(&username);
 
     let user_id = match resolve_user_id(&jmap.mail_pool, &username).await {
-        Ok(id) => id,
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            tracing::warn!(
+                username = %username,
+                "JMAP: authenticated user not found in users table; rejecting to prevent cross-user data access"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "user not provisioned"})),
+            )
+                .into_response();
+        }
         Err(e) => {
             tracing::error!(error = %e, "JMAP: users table lookup failed");
             return (
