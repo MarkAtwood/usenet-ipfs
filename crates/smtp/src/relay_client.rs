@@ -381,7 +381,7 @@ impl AsyncWrite for TlsOrPlain {
     }
 }
 
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 /// RFC 5321 §4.5.3.1.5 — maximum reply line length is 512 octets including CRLF.
 const MAX_SMTP_LINE: usize = 512;
 
@@ -404,7 +404,7 @@ pub struct RelayEnvelope {
 
 /// Deliver an article to a relay peer via SMTP.
 ///
-/// Wraps [`do_deliver`] with a 30-second overall timeout.
+/// Wraps [`do_deliver`] with a 300-second overall timeout.
 ///
 /// `local_hostname` is used as the EHLO domain (RFC 5321 §4.1.1.1).  Pass the
 /// operator-configured `config.hostname`; a bare label is rejected by many
@@ -436,7 +436,7 @@ pub async fn deliver_via_relay(
     .map_err(|_| {
         SmtpRelayError::Io(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            "SMTP relay delivery timed out after 30 seconds",
+            "SMTP relay delivery timed out after 300 seconds",
         ))
     })?
 }

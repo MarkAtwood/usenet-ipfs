@@ -247,42 +247,38 @@ impl NntpQueue {
                                 // Build the final outbound article in a single allocation.
                                 //
                                 // When a DKIM signer is present:
-                                //   1. Pre-size the buffer with a generous DKIM header
-                                //      estimate so the later rotate_right fits without
-                                //      reallocation.
-                                //   2. Append the inject header and article body.
-                                //   3. Sign that slice (the content the DKIM header covers).
-                                //   4. Rotate the DKIM header bytes into the front — no
-                                //      second Vec, no second body copy.
+                                //   1. Build a body buffer (inject header + article bytes).
+                                //   2. Sign that slice (the content the DKIM header covers).
+                                //   3. Build the final buffer: DKIM header first, then body.
+                                //      Two extend_from_slice calls; no O(n) rotate.
                                 //
-                                // When no signer is present, skip steps 1/3/4 and size
-                                // the buffer exactly.
+                                // When no signer is present, size the buffer exactly and
+                                // write inject header + article bytes directly.
                                 const DKIM_HEADER_ESTIMATE: usize = 512;
                                 let inject_header =
                                     format!("X-Stoa-Injection-Source: {injection_source}\r\n");
                                 let article = if let Some(signer) = &self.dkim_signer {
-                                    let mut buf = Vec::with_capacity(
-                                        DKIM_HEADER_ESTIMATE + inject_header.len() + bytes.len(),
+                                    // Build inject-header+body slice to sign.
+                                    let mut body = Vec::with_capacity(
+                                        inject_header.len() + bytes.len(),
                                     );
-                                    buf.extend_from_slice(inject_header.as_bytes());
-                                    buf.extend_from_slice(&bytes);
+                                    body.extend_from_slice(inject_header.as_bytes());
+                                    body.extend_from_slice(&bytes);
                                     // Sign the inject-header+body slice.
-                                    match signer.sign(&buf) {
+                                    match signer.sign(&body) {
                                         Ok(sig) => {
                                             let dkim_hdr = sig.to_header();
                                             let dkim_bytes = dkim_hdr.as_bytes();
-                                            // Prepend DKIM header by rotating into reserved space.
-                                            let body_len = buf.len();
-                                            buf.extend_from_slice(dkim_bytes);
-                                            buf.rotate_right(dkim_bytes.len());
-                                            debug_assert_eq!(
-                                                buf.len(),
-                                                dkim_bytes.len() + body_len
+                                            // Build final buffer: DKIM header first, then body.
+                                            let mut buf = Vec::with_capacity(
+                                                DKIM_HEADER_ESTIMATE + body.len(),
                                             );
+                                            buf.extend_from_slice(dkim_bytes);
+                                            buf.extend_from_slice(&body);
                                             buf
                                         }
                                         Err(e) => {
-                                            let message_id = extract_message_id(&buf);
+                                            let message_id = extract_message_id(&body);
                                             // DKIM signing failure is permanent (deterministic
                                             // Ed25519 key — if signing fails, it will always
                                             // fail). Article is held in queue for operator
