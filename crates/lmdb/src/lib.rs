@@ -108,7 +108,17 @@ impl std::fmt::Display for LmdbError {
     }
 }
 
-impl std::error::Error for LmdbError {}
+impl std::error::Error for LmdbError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // MapFull and ReadersFull are leaf errors with no underlying source.
+        // Other(String) stringifies the original heed::Error at the conversion
+        // boundary (see From<heed::Error>) — the source is not preserved because
+        // heed::Error does not implement Send + Sync + 'static, which would be
+        // required to box it here.  Callers that need the full detail should
+        // inspect the Display output of Other(msg).
+        None
+    }
+}
 
 impl From<heed::Error> for LmdbError {
     fn from(e: heed::Error) -> Self {
