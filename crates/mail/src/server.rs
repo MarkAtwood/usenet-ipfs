@@ -8,7 +8,9 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use jmap_server::{Dispatcher, HandlerFuture, JmapHandler};
+use jmap_server::{
+    check_known_capabilities, request_error, Dispatcher, HandlerFuture, JmapHandler,
+};
 use jmap_types::{JmapError, JmapRequest};
 use serde_json::{json, Value};
 use stoa_auth::{AuthConfig, CredentialStore, OidcStore};
@@ -538,10 +540,7 @@ fn stoa_value_to_result(v: Value) -> Result<(Value, Vec<jmap_types::Invocation>)
 /// - `Ok(None)` — authenticated user not in the `users` table; caller should
 ///   return 403 to prevent cross-user data access.
 /// - `Err` — database error; caller should return 503.
-async fn resolve_user_id(
-    pool: &sqlx::AnyPool,
-    username: &str,
-) -> Result<Option<i64>, sqlx::Error> {
+async fn resolve_user_id(pool: &sqlx::AnyPool, username: &str) -> Result<Option<i64>, sqlx::Error> {
     match sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE username = ?")
         .bind(username)
         .fetch_optional(pool)
@@ -637,6 +636,22 @@ async fn jmap_api_handler(
                 .into_response();
         }
     };
+
+    // RFC 8620 §3.3 — reject any request that declares a capability we don't support.
+    // Always include the admin capability in the known set; callers that send it
+    // without being an operator simply won't receive admin method responses.
+    const KNOWN_CAPABILITIES: &[&str] = &[
+        "urn:ietf:params:jmap:core",
+        "urn:ietf:params:jmap:mail",
+        "urn:ietf:params:jmap:blob",
+        "urn:stoa:jmap:cid",
+        "urn:ietf:params:jmap:usenet-ipfs-admin",
+    ];
+    if let Err(e) = check_known_capabilities(&request, KNOWN_CAPABILITIES) {
+        let re = request_error(e);
+        let (parts, body) = re.into_response().into_parts();
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(body));
+    }
 
     let username = user
         .map(|Extension(u)| u.0)
@@ -1770,8 +1785,7 @@ mod tests {
         }];
         let patched = Arc::new(AppState {
             credential_store: Arc::new(
-                CredentialStore::from_credentials(&users)
-                    .expect("test setup: valid bcrypt hashes"),
+                CredentialStore::from_credentials(&users).expect("test setup: valid bcrypt hashes"),
             ),
             auth_config: Arc::new(AuthConfig {
                 required: true,
@@ -2046,7 +2060,9 @@ mod tests {
         let addr = spawn_server(state).await;
 
         let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/jmap/download/u_alice/{cid}/block.bin"))
+            .get(format!(
+                "http://{addr}/jmap/download/u_alice/{cid}/block.bin"
+            ))
             .basic_auth("alice", Some("pass"))
             .send()
             .await
