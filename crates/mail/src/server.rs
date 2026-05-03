@@ -76,6 +76,12 @@ pub struct AppState {
 
 /// Authenticated user identity extracted from HTTP Basic Auth.
 ///
+/// Canonical username used for unauthenticated (dev-mode) requests.
+///
+/// Shared by `issue_token`, `list_tokens`, and `revoke_token` so that tokens
+/// issued in dev mode can be listed and revoked by the same username.
+pub const DEV_USERNAME: &str = "dev";
+
 /// Inserted into request extensions by `basic_auth_middleware` after
 /// successful credential verification.  Handlers receive it via
 /// `Extension<AuthenticatedUser>`.  In dev mode no `AuthenticatedUser`

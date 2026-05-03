@@ -33,7 +33,13 @@ impl VerificationStore {
             let dns_reason_buf: String;
             let reason: Option<&str> = match &v.result {
                 crate::types::VerifResult::DnsError { domain, err } => {
-                    dns_reason_buf = format!("{domain}\x00{err}");
+                    // Strip any NUL bytes from domain before encoding.  RFC 1035
+                    // domain labels cannot contain NUL, so a NUL in `domain`
+                    // indicates a malformed DKIM-Signature header; removing it
+                    // prevents the NUL-split in parse_result from misparsing the
+                    // stored value.
+                    let safe_domain = domain.replace('\x00', "");
+                    dns_reason_buf = format!("{safe_domain}\x00{err}");
                     Some(&dns_reason_buf)
                 }
                 r => r.reason(),

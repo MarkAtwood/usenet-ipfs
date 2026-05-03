@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::server::{AppState, AuthenticatedUser};
+use crate::server::{AppState, AuthenticatedUser, DEV_USERNAME};
 
 #[derive(Deserialize)]
 pub struct TokenIssueRequest {
@@ -46,7 +46,7 @@ pub async fn issue_token(
     let username = user
         .map(|Extension(u)| u.0)
         .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| "dev".to_string());
+        .unwrap_or_else(|| DEV_USERNAME.to_string());
 
     let (label, expires_in_days) = match body {
         Some(Json(req)) => (req.label, req.expires_in_days),
@@ -83,7 +83,9 @@ pub async fn list_tokens(
     State(state): State<Arc<AppState>>,
     user: Option<Extension<AuthenticatedUser>>,
 ) -> impl IntoResponse {
-    let username = user.map(|Extension(u)| u.0).unwrap_or_default();
+    let username = user
+        .map(|Extension(u)| u.0)
+        .unwrap_or_else(|| DEV_USERNAME.to_string());
     match state.token_store.list(&username).await {
         Ok(tokens) => {
             let entries: Vec<TokenListEntry> = tokens
@@ -120,7 +122,9 @@ pub async fn revoke_token(
     user: Option<Extension<AuthenticatedUser>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let username = user.map(|Extension(u)| u.0).unwrap_or_default();
+    let username = user
+        .map(|Extension(u)| u.0)
+        .unwrap_or_else(|| DEV_USERNAME.to_string());
     match state.token_store.revoke(&username, &id).await {
         Ok(true) => (StatusCode::OK, Json(serde_json::json!({"deleted": true}))),
         Ok(false) => (
