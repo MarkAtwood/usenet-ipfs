@@ -111,6 +111,7 @@ mod tests {
             "<tv1@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_067_200_000, // 2024-01-01T00:00:00Z in ms
+            vec![],
         )
         .expect("build_article must succeed for TV1");
         let expected =
@@ -131,6 +132,7 @@ mod tests {
             "<tv1@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_067_200_000,
+            vec![],
         )
         .expect("build_article must succeed for TV1");
         assert!(
@@ -157,6 +159,7 @@ mod tests {
             "<tv1@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_067_200_000,
+            vec![],
         )
         .expect("build_article must succeed for TV1");
 
@@ -277,6 +280,7 @@ mod tests {
             "<tv2@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_196_800_000, // 2024-01-02T12:00:00Z in ms
+            vec![],
         )
         .expect("build_article must succeed for TV2");
         let expected =
@@ -297,6 +301,7 @@ mod tests {
             "<tv2@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_196_800_000,
+            vec![],
         )
         .expect("build_article must succeed for TV2");
 
@@ -336,6 +341,7 @@ mod tests {
             "<tv2@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_196_800_000,
+            vec![],
         )
         .expect("build_article must succeed for TV2");
         assert!(
@@ -355,6 +361,7 @@ mod tests {
             "<tv2@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_196_800_000,
+            vec![],
         )
         .expect("build_article must succeed for TV2");
 
@@ -480,6 +487,7 @@ mod tests {
             "<tv3@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_240_000_000, // 2024-01-03T00:00:00Z in ms
+            vec![],
         )
         .expect("build_article must succeed for TV3");
         let expected =
@@ -500,6 +508,7 @@ mod tests {
             "<tv3@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_240_000_000,
+            vec![],
         )
         .expect("build_article must succeed for TV3");
 
@@ -549,6 +558,7 @@ mod tests {
             "<tv3@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_240_000_000,
+            vec![],
         )
         .expect("build_article must succeed for TV3");
 
@@ -584,6 +594,7 @@ mod tests {
             "<tv3@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_240_000_000,
+            vec![],
         )
         .expect("build_article must succeed for TV3");
 
@@ -696,6 +707,7 @@ mod tests {
             "<tv4@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_326_400_000, // 2024-01-04T00:00:00Z in ms
+            vec![],
         )
         .expect("build_article must succeed for TV4");
         let expected =
@@ -717,6 +729,7 @@ mod tests {
             "<tv4@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_326_400_000,
+            vec![],
         )
         .expect("build_article must succeed for TV4");
 
@@ -757,6 +770,7 @@ mod tests {
             "<tv4@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_326_400_000,
+            vec![],
         )
         .expect("build_article must succeed for TV4");
 
@@ -785,6 +799,7 @@ mod tests {
             "<tv4@example.com>".into(),
             vec!["comp.lang.rust".into()],
             1_704_326_400_000,
+            vec![],
         )
         .expect("build_article must succeed for TV4");
 

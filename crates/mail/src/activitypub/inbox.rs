@@ -367,6 +367,7 @@ async fn handle_create(
         &message_id,
         newsgroups,
         hlc_timestamp,
+        vec![], // ActivityPub-ingested articles are not signed by this operator
     )
     .await
     {

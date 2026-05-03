@@ -117,6 +117,7 @@ pub async fn jmap_upload(
         &message_id,
         newsgroups,
         hlc_timestamp,
+        vec![], // blob upload path does not go through sign_article
     )
     .await
     {

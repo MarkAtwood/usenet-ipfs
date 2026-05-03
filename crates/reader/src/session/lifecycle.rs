@@ -1262,7 +1262,7 @@ async fn run_post_pipeline(
     // Produces signed_bytes with the X-Stoa-Sig header inserted.
     // The group log entry signature is computed separately over log entry
     // canonical bytes inside append_to_groups, where parent CIDs are known.
-    let (signed_bytes, _) = {
+    let (signed_bytes, sig_bytes) = {
         let _span = tracing::info_span!("post.sign_article").entered();
         sign_article(&stores.signing_key, article_bytes)
     };
@@ -1294,6 +1294,7 @@ async fn run_post_pipeline(
         &message_id,
         newsgroups_str,
         primary_hlc,
+        sig_bytes,
     )
     .instrument(tracing::info_span!("post.ipfs_block_put"))
     .await

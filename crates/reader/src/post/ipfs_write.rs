@@ -450,6 +450,10 @@ pub async fn write_article_to_ipfs(
 /// 4. Store every block via `ipfs_store.put_block(cid, data)`.
 /// 5. Insert `(message_id, root_cid)` into `msgid_map`.
 /// 6. Return `Ok(root_cid)` on success.
+///
+/// `operator_signature`: raw 64-byte Ed25519 signature from `sign_article`
+/// (over the pre-sign article bytes), or `vec![]` for unsigned articles such
+/// as ActivityPub-ingested articles.
 pub async fn write_ipld_article_to_ipfs(
     ipfs_store: &dyn IpfsBlockStore,
     msgid_map: &MsgIdMap,
@@ -457,6 +461,7 @@ pub async fn write_ipld_article_to_ipfs(
     message_id: &str,
     newsgroups: Vec<String>,
     hlc_timestamp: u64,
+    operator_signature: Vec<u8>,
 ) -> Result<Cid, Response> {
     // Defensive backstop dedup: same rationale as the lookup in
     // write_article_to_ipfs above; see post::pipeline::check_duplicate_msgid.
@@ -486,6 +491,7 @@ pub async fn write_ipld_article_to_ipfs(
         message_id.to_owned(),
         newsgroups,
         hlc_timestamp,
+        operator_signature,
     )
     .map_err(|e| Response::new(441, format!("Posting failed: IPLD build error: {e}")))?;
 

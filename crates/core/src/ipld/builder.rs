@@ -57,6 +57,8 @@ impl std::error::Error for BuildError {}
 /// - `message_id`: Message-ID header value (including angle brackets)
 /// - `newsgroups`: destination groups (sorted lexicographically)
 /// - `hlc_timestamp`: HLC timestamp for this log entry
+/// - `operator_signature`: raw 64-byte Ed25519 signature over the pre-sign
+///   article bytes (from `sign_article`), or `vec![]` for unsigned articles.
 ///
 /// # Returns
 /// `BuiltArticle` containing the root CID and all blocks to store.
@@ -66,6 +68,7 @@ pub fn build_article(
     message_id: String,
     newsgroups: Vec<String>,
     hlc_timestamp: u64,
+    operator_signature: Vec<u8>,
 ) -> Result<BuiltArticle, BuildError> {
     let (header_cid, header_block_bytes) = header_block(header_bytes);
     let (body_cid, body_block_bytes) = body_block(body_bytes);
@@ -95,6 +98,7 @@ pub fn build_article(
         message_id,
         newsgroups,
         hlc_timestamp,
+        operator_signature,
     );
 
     let root_node = ArticleRootNode {
@@ -149,6 +153,7 @@ mod tests {
             "<test@example.com>".to_string(),
             vec!["comp.lang.rust".to_string()],
             1_700_000_000_000,
+            vec![],
         )
         .expect("build_article must succeed for well-formed input")
     }
@@ -172,6 +177,7 @@ mod tests {
             "<test@example.com>".to_string(),
             vec!["comp.lang.rust".to_string()],
             1_700_000_000_000,
+            vec![],
         )
         .expect("first build must succeed");
         let built2 = build_article(
@@ -180,6 +186,7 @@ mod tests {
             "<test@example.com>".to_string(),
             vec!["comp.lang.rust".to_string()],
             1_700_000_000_000,
+            vec![],
         )
         .expect("second build must succeed");
 
@@ -215,6 +222,7 @@ mod tests {
             "<test@example.com>".to_string(),
             vec!["comp.lang.rust".to_string()],
             1_700_000_000_000,
+            vec![],
         )
         .expect("build must succeed");
 
@@ -286,6 +294,7 @@ mod tests {
             "<test@example.com>".to_string(),
             vec!["comp.lang.rust".to_string()],
             1_700_000_000_000,
+            vec![],
         )
         .expect("build must succeed");
 
@@ -306,6 +315,7 @@ mod tests {
             "<test2@example.com>".to_string(),
             vec!["comp.lang.rust".to_string()],
             1_700_000_000_000,
+            vec![],
         )
         .expect("build must succeed");
 

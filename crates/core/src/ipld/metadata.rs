@@ -49,23 +49,21 @@ pub fn extract_content_type_summary(header_bytes: &[u8]) -> String {
 /// - `message_id`: the Message-ID header value (already parsed)
 /// - `newsgroups`: the Newsgroups list (already parsed, sorted)
 /// - `hlc_timestamp`: the HLC timestamp for this entry (caller-provided)
-///
-/// Returns a partially-filled ArticleMetadata; `operator_signature` is
-/// set to empty bytes because the signing pipeline is not yet wired up.
-/// Callers that need a signed article must populate the field after this
-/// function returns.
+/// - `operator_signature`: raw 64-byte Ed25519 signature over the pre-sign
+///   article bytes (from `sign_article`), or an empty `Vec` for unsigned articles.
 pub fn compute_metadata(
     header_bytes: &[u8],
     body_bytes: &[u8],
     message_id: String,
     newsgroups: Vec<String>,
     hlc_timestamp: u64,
+    operator_signature: Vec<u8>,
 ) -> crate::ipld::root_node::ArticleMetadata {
     crate::ipld::root_node::ArticleMetadata {
         message_id,
         newsgroups,
         hlc_timestamp,
-        operator_signature: Vec::new(),
+        operator_signature,
         byte_count: u64::try_from(header_bytes.len())
             .expect("usize fits in u64 on all supported platforms")
             + compute_byte_count(body_bytes),
@@ -156,6 +154,7 @@ mod tests {
             "<test-001@example.com>".to_string(),
             vec!["comp.lang.rust".to_string(), "comp.test".to_string()],
             1_700_000_000_000,
+            vec![],
         );
 
         assert_eq!(metadata.byte_count, 64); // 43 + 21
