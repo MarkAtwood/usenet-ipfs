@@ -206,6 +206,7 @@ async fn jmap_session_e2e() {
     let state = Arc::new(AppState {
         start_time: std::time::Instant::now(),
         jmap: Some(jmap_stores),
+        jmap_dispatcher: None,
         credential_store: Arc::new(stoa_auth::CredentialStore::empty()),
         auth_config: Arc::new(stoa_auth::AuthConfig::default()),
         token_store,

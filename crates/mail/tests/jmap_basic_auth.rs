@@ -45,6 +45,7 @@ async fn auth_state_alice() -> Arc<AppState> {
     Arc::new(AppState {
         start_time: Instant::now(),
         jmap: None,
+        jmap_dispatcher: None,
         credential_store: Arc::new(
             CredentialStore::from_credentials(&users).expect("test setup: valid bcrypt hashes"),
         ),
@@ -70,6 +71,7 @@ async fn dev_state() -> Arc<AppState> {
     Arc::new(AppState {
         start_time: Instant::now(),
         jmap: None,
+        jmap_dispatcher: None,
         credential_store: Arc::new(CredentialStore::empty()),
         auth_config: Arc::new(AuthConfig::default()),
         token_store: make_token_store().await,

@@ -150,6 +150,7 @@ async fn spawn_dev_server(tag: &str) -> (String, Vec<tempfile::TempPath>) {
     let state = Arc::new(AppState {
         start_time: std::time::Instant::now(),
         jmap: Some(jmap_stores),
+        jmap_dispatcher: None,
         credential_store: Arc::new(stoa_auth::CredentialStore::empty()),
         auth_config: Arc::new(stoa_auth::AuthConfig::default()),
         token_store: Arc::new(TokenStore::new(Arc::clone(&mail_pool_arc))),

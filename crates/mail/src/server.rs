@@ -59,10 +59,23 @@ pub struct JmapStores {
     pub special_mailboxes: Arc<Vec<crate::mailbox::types::SpecialMailbox>>,
 }
 
+/// Opaque wrapper around the per-process JMAP [`Dispatcher`].
+///
+/// Keeps [`JmapCaller`] (a private type) out of the public API of [`AppState`]
+/// while still allowing `main.rs` to construct `AppState` with
+/// `jmap_dispatcher: None`.  Use [`build_jmap_dispatcher`] to obtain a value.
+pub struct OpaqueJmapDispatcher(Dispatcher<JmapCaller>);
+
 #[derive(Clone)]
 pub struct AppState {
     pub start_time: Instant,
     pub jmap: Option<Arc<JmapStores>>,
+    /// JMAP dispatcher built once at startup from `jmap`.  `None` when JMAP is
+    /// not configured.  Stored here so `jmap_api_handler` does not rebuild it
+    /// on every request.
+    ///
+    /// The inner type is opaque to callers outside the crate.
+    pub jmap_dispatcher: Option<Arc<OpaqueJmapDispatcher>>,
     pub credential_store: Arc<CredentialStore>,
     pub auth_config: Arc<AuthConfig>,
     pub token_store: Arc<TokenStore>,
@@ -441,7 +454,7 @@ async fn jmap_session_handler(
 
 /// Per-request JMAP caller context forwarded to each method handler.
 #[derive(Clone)]
-struct JmapCaller {
+pub(crate) struct JmapCaller {
     username: String,
     user_id: i64,
     is_operator: bool,
@@ -450,12 +463,12 @@ struct JmapCaller {
     slow_threshold_ms: u64,
 }
 
-/// Adapter that wraps `route_method` as a [`JmapHandler`].
+/// Adapter that implements [`JmapHandler`] for all JMAP methods.
 ///
 /// All registered methods share a single `StoaHandler` instance.  The
-/// `method` argument passed to [`JmapHandler::call`] selects the arm inside
-/// `route_method`.  This gives us [`Dispatcher`]-level ResultReference
-/// resolution while keeping all handler logic in the existing `route_method`.
+/// `method` argument passed to [`JmapHandler::call`] selects the arm in the
+/// exhaustive match below.  This gives us [`Dispatcher`]-level ResultReference
+/// resolution while keeping all handler logic in one place.
 struct StoaHandler {
     stores: Arc<JmapStores>,
 }
@@ -472,6 +485,16 @@ impl JmapHandler<JmapCaller> for StoaHandler {
         Box::pin(async move {
             let t0 = Instant::now();
 
+            // RFC 8621 §2: every method call carries an accountId.  If it is
+            // present and does not match the authenticated principal's account,
+            // return accountNotFound immediately.  An absent accountId is
+            // injected below for methods that need it.
+            if let Some(requested_id) = args.get("accountId").and_then(|v| v.as_str()) {
+                if requested_id != caller.canonical_account_id.as_str() {
+                    return Err(JmapError::account_not_found());
+                }
+            }
+
             // Build a StoaBackend for the generic jmap-server handlers.
             let backend = StoaBackend {
                 stores: Arc::clone(&stores),
@@ -479,29 +502,20 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                 canonical_account_id: caller.canonical_account_id.clone(),
             };
 
-            // The seven read arms are handled by the generic jmap-server handlers
-            // (handle_get / handle_changes / handle_query), which correctly implement
-            // RFC 8620 argument parsing and response shaping.  Write, blob, snippet,
-            // and admin arms still go through route_method.
-            //
             // The generic handlers require accountId to be present.  Inject the
-            // canonical account ID when the client omits it (null or absent) so
-            // the handlers see a valid accountId without rejecting the call.
-            let args = match method.as_str() {
-                "Mailbox/get" | "Mailbox/changes" | "Mailbox/query" | "Email/get"
-                | "Email/changes" | "Email/query" | "Thread/get" => {
-                    let mut a = args;
-                    if a.get("accountId").and_then(|v| v.as_str()).is_none() {
-                        if let Some(obj) = a.as_object_mut() {
-                            obj.insert(
-                                "accountId".to_string(),
-                                Value::String(caller.canonical_account_id.clone()),
-                            );
-                        }
+            // canonical account ID when the client omits it so the handlers see
+            // a valid accountId without rejecting the call.
+            let args = {
+                let mut a = args;
+                if a.get("accountId").and_then(|v| v.as_str()).is_none() {
+                    if let Some(obj) = a.as_object_mut() {
+                        obj.insert(
+                            "accountId".to_string(),
+                            Value::String(caller.canonical_account_id.clone()),
+                        );
                     }
-                    a
                 }
-                _ => args,
+                a
             };
 
             // Enforce maxObjectsInGet (500) for Email/get before the generic handler
@@ -520,6 +534,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
 
             let result: Result<(Value, Vec<jmap_types::Invocation>), jmap_types::JmapError> =
                 match method.as_str() {
+                    // ── RFC 8621 read methods via generic jmap-server handlers ────────────
                     "Mailbox/get" => handle_get::<Mailbox, _>(&backend, args).await,
                     "Mailbox/changes" => handle_changes::<Mailbox, _>(&backend, args).await,
                     "Mailbox/query" => handle_query::<Mailbox, _>(&backend, args).await,
@@ -527,20 +542,417 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                     "Email/changes" => handle_changes::<Email, _>(&backend, args).await,
                     "Email/query" => handle_query::<Email, _>(&backend, args).await,
                     "Thread/get" => handle_get::<Thread, _>(&backend, args).await,
-                    _ => {
-                        // All remaining arms (writes, blobs, snippets, admin, stubs).
-                        let v = route_method(
-                            &method,
-                            args,
-                            &stores,
-                            &caller.canonical_account_id,
-                            caller.process_start,
-                            caller.is_operator,
+
+                    // ── RFC 8621 write methods ────────────────────────────────────────────
+                    "Mailbox/set" => {
+                        let old_state = stores
+                            .state_store
+                            .get_state(caller.user_id, "Mailbox")
+                            .await
+                            .unwrap_or_else(|_| "0".to_string());
+                        let mut result = crate::mailbox::set::handle_mailbox_set(
+                            &args,
                             caller.user_id,
+                            &stores.subscription_store,
+                            &stores.article_numbers,
+                            &old_state,
+                            &old_state,
                         )
                         .await;
-                        stoa_value_to_result(v)
+                        let any_created = result
+                            .get("created")
+                            .and_then(|v| v.as_object())
+                            .map(|m| !m.is_empty())
+                            .unwrap_or(false);
+                        let any_destroyed = result
+                            .get("destroyed")
+                            .and_then(|v| v.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        if any_created || any_destroyed {
+                            let new_state = stores
+                                .state_store
+                                .bump_state(caller.user_id, "Mailbox")
+                                .await
+                                .unwrap_or_else(|_| old_state.clone());
+                            if let Some(obj) = result.as_object_mut() {
+                                obj.insert("newState".to_string(), Value::String(new_state));
+                            }
+                        }
+                        Ok((result, vec![]))
                     }
+
+                    "Email/set" => {
+                        let old_state = stores
+                            .state_store
+                            .get_state(caller.user_id, "Email")
+                            .await
+                            .unwrap_or_else(|_| "0".to_string());
+
+                        let mut result =
+                            match crate::email::set::handle_email_set(args.clone(), &old_state) {
+                                Ok(v) => v,
+                                Err(e) => return Err(e),
+                            };
+
+                        let mut any_changed = false;
+
+                        // Handle keyword updates.
+                        if let Some(update_map) = args.get("update").and_then(|v| v.as_object()) {
+                            let (mut updated, not_updated) =
+                                crate::email::set::handle_keyword_update(
+                                    update_map,
+                                    caller.user_id,
+                                    &stores.user_flags,
+                                )
+                                .await;
+                            // An id must not appear in both updated and notUpdated.
+                            if let Some(already_not_updated) = result["notUpdated"].as_object() {
+                                for id in already_not_updated.keys() {
+                                    updated.remove(id);
+                                }
+                            }
+                            if !updated.is_empty() {
+                                any_changed = true;
+                                result["updated"] = Value::Object(updated);
+                            }
+                            if !not_updated.is_empty() {
+                                let existing = result["notUpdated"]
+                                    .as_object()
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let mut merged = existing;
+                                merged.extend(not_updated);
+                                result["notUpdated"] = Value::Object(merged);
+                            }
+                        }
+
+                        // Handle creates.
+                        if let Some(create_map) = args.get("create").and_then(|v| v.as_object()) {
+                            let known_groups = stores
+                                .article_numbers
+                                .list_groups()
+                                .await
+                                .unwrap_or_default();
+                            let (created, not_created) = crate::email::set::handle_email_create(
+                                create_map,
+                                stores.ipfs.as_ref(),
+                                &stores.msgid_map,
+                                stores.smtp_relay_queue.as_ref(),
+                                &known_groups,
+                            )
+                            .await;
+                            if !created.is_empty() {
+                                any_changed = true;
+                                result["created"] = Value::Object(created);
+                            }
+                            if !not_created.is_empty() {
+                                result["notCreated"] = Value::Object(not_created);
+                            }
+                        }
+
+                        // Set real oldState/newState; bump state if any write succeeded.
+                        let new_state = if any_changed {
+                            stores
+                                .state_store
+                                .bump_state(caller.user_id, "Email")
+                                .await
+                                .unwrap_or_else(|_| old_state.clone())
+                        } else {
+                            old_state.clone()
+                        };
+                        result["oldState"] = Value::String(old_state);
+                        result["newState"] = Value::String(new_state.clone());
+
+                        // Record changes in the change log for Email/changes.
+                        let new_seq: i64 = new_state.parse().unwrap_or(0);
+                        if let Some(created_obj) = result["created"].as_object() {
+                            let new_cid_ids: Vec<String> = created_obj
+                                .values()
+                                .filter_map(|v| v.get("id"))
+                                .filter_map(|v| v.as_str())
+                                .map(str::to_string)
+                                .collect();
+                            if !new_cid_ids.is_empty() {
+                                if let Err(e) = stores
+                                    .change_log
+                                    .record_created(caller.user_id, "Email", &new_cid_ids, new_seq)
+                                    .await
+                                {
+                                    tracing::warn!("change_log.record_created failed: {e}");
+                                }
+                            }
+                        }
+                        if let Some(updated_obj) = result["updated"].as_object() {
+                            let updated_ids: Vec<String> = updated_obj.keys().cloned().collect();
+                            if !updated_ids.is_empty() {
+                                if let Err(e) = stores
+                                    .change_log
+                                    .record_updated(caller.user_id, "Email", &updated_ids, new_seq)
+                                    .await
+                                {
+                                    tracing::warn!("change_log.record_updated failed: {e}");
+                                }
+                            }
+                        }
+
+                        Ok((result, vec![]))
+                    }
+
+                    // ── RFC 9404 Blob methods ─────────────────────────────────────────────
+                    "Blob/get" => {
+                        let ids: Vec<String> = args
+                            .get("ids")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let mut list: Vec<Value> = Vec::new();
+                        let mut not_found: Vec<String> = Vec::new();
+
+                        for id in &ids {
+                            let cid = match cid::Cid::try_from(id.as_str()) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    not_found.push(id.clone());
+                                    continue;
+                                }
+                            };
+                            match stores.ipfs.get_raw(&cid).await {
+                                Ok(bytes) => {
+                                    let encoded = data_encoding::BASE64.encode(&bytes);
+                                    list.push(json!({
+                                        "id": id,
+                                        "data:asBase64": encoded,
+                                        "type": "message/rfc822",
+                                        "size": bytes.len()
+                                    }));
+                                }
+                                Err(stoa_reader::post::ipfs_write::IpfsWriteError::NotFound(_)) => {
+                                    not_found.push(id.clone());
+                                }
+                                Err(e) => {
+                                    tracing::warn!(blob_id = %id, "Blob/get IPFS error: {e}");
+                                    not_found.push(id.clone());
+                                }
+                            }
+                        }
+
+                        Ok((
+                            json!({
+                                "accountId": caller.canonical_account_id,
+                                "list": list,
+                                "notFound": not_found
+                            }),
+                            vec![],
+                        ))
+                    }
+
+                    "Blob/copy" => {
+                        let from_account_id = args
+                            .get("fromAccountId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let blob_ids: Vec<String> = args
+                            .get("blobIds")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let mut copied: serde_json::Map<String, Value> = serde_json::Map::new();
+                        let mut not_copied: serde_json::Map<String, Value> = serde_json::Map::new();
+                        for id in &blob_ids {
+                            if cid::Cid::try_from(id.as_str()).is_ok() {
+                                copied.insert(id.clone(), Value::String(id.clone()));
+                            } else {
+                                not_copied.insert(
+                                    id.clone(),
+                                    json!({"type": "blobNotFound",
+                                           "description": "not a valid CID"}),
+                                );
+                            }
+                        }
+
+                        Ok((
+                            json!({
+                                "fromAccountId": from_account_id,
+                                "accountId": caller.canonical_account_id,
+                                "copied": copied,
+                                "notCopied": not_copied
+                            }),
+                            vec![],
+                        ))
+                    }
+
+                    // ── RFC 8621 §5.4 SearchSnippet/get ──────────────────────────────────
+                    "SearchSnippet/get" => {
+                        let email_ids: Vec<String> = args
+                            .get("emailIds")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let filter = args.get("filter").cloned();
+                        let text_query = filter
+                            .as_ref()
+                            .and_then(|f| f.get("text"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        let mut list: Vec<Value> = Vec::new();
+                        let mut not_found: Vec<String> = Vec::new();
+
+                        for email_id in &email_ids {
+                            let cid = match cid::Cid::try_from(email_id.as_str()) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    not_found.push(email_id.clone());
+                                    continue;
+                                }
+                            };
+
+                            let (subject_snip, preview_snip) = if text_query.is_empty()
+                                || stores.search_index.is_none()
+                            {
+                                (None, None)
+                            } else if let Some((group, num)) = stores
+                                .article_numbers
+                                .lookup_by_cid(&cid)
+                                .await
+                                .ok()
+                                .flatten()
+                            {
+                                let subject_text = stores
+                                    .overview_store
+                                    .query_by_number(&group, num)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|r| r.subject)
+                                    .unwrap_or_default();
+
+                                let body_text: String = async {
+                                    let raw = match stores.ipfs.get_raw(&cid).await {
+                                        Ok(r) => r,
+                                        Err(_) => return String::new(),
+                                    };
+                                    let root: stoa_core::ipld::root_node::ArticleRootNode =
+                                        match serde_ipld_dagcbor::from_slice(&raw) {
+                                            Ok(r) => r,
+                                            Err(_) => return String::new(),
+                                        };
+                                    match stores.ipfs.get_raw(&root.body_cid).await {
+                                        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                                        Err(_) => String::new(),
+                                    }
+                                }
+                                .await;
+
+                                if let Some(ref idx) = stores.search_index {
+                                    idx.make_snippets(&text_query, &subject_text, &body_text)
+                                } else {
+                                    (None, None)
+                                }
+                            } else {
+                                not_found.push(email_id.clone());
+                                continue;
+                            };
+
+                            list.push(json!({
+                                "emailId": email_id,
+                                "subject": subject_snip,
+                                "preview": preview_snip,
+                            }));
+                        }
+
+                        Ok((
+                            json!({
+                                "accountId": caller.canonical_account_id,
+                                "filter": filter.unwrap_or(json!(null)),
+                                "list": list,
+                                "notFound": not_found,
+                            }),
+                            vec![],
+                        ))
+                    }
+
+                    // ── Admin methods (urn:ietf:params:jmap:usenet-ipfs-admin) ────────────
+                    // Non-operators receive a `forbidden` error.
+                    "ServerStatus/get" => {
+                        if !caller.is_operator {
+                            return Err(JmapError::forbidden());
+                        }
+                        let uptime_secs = caller.process_start.elapsed().as_secs();
+                        Ok((
+                            json!({
+                                "accountId": caller.canonical_account_id,
+                                "status": { "uptime_secs": uptime_secs }
+                            }),
+                            vec![],
+                        ))
+                    }
+
+                    "Peer/get" => {
+                        if !caller.is_operator {
+                            return Err(JmapError::forbidden());
+                        }
+                        Ok((
+                            json!({
+                                "accountId": caller.canonical_account_id,
+                                "list": [],
+                                "notFound": []
+                            }),
+                            vec![],
+                        ))
+                    }
+
+                    "GroupLog/get" => {
+                        if !caller.is_operator {
+                            return Err(JmapError::forbidden());
+                        }
+                        let groups = match stores.article_numbers.list_groups().await {
+                            Ok(g) => g,
+                            Err(e) => return Err(JmapError::server_fail(&e.to_string())),
+                        };
+                        let list: Vec<Value> = groups
+                            .iter()
+                            .map(|(name, lo, hi)| {
+                                let count = if *hi < *lo { 0u64 } else { hi - lo + 1 };
+                                json!({
+                                    "id": name,
+                                    "name": name,
+                                    "articleCount": count
+                                })
+                            })
+                            .collect();
+                        Ok((
+                            json!({
+                                "accountId": caller.canonical_account_id,
+                                "list": list,
+                                "notFound": []
+                            }),
+                            vec![],
+                        ))
+                    }
+
+                    // ── Registered but not yet implemented RFC 8621 stubs ─────────────────
+                    // These are registered in the Dispatcher so that the protocol layer
+                    // returns a well-formed `unknownMethod` error rather than a generic
+                    // HTTP 404.  Implement by adding a match arm above.
+                    _ => Err(JmapError::unknown_method()),
                 };
 
             let elapsed = t0.elapsed().as_secs_f64();
@@ -573,33 +985,6 @@ impl JmapHandler<JmapCaller> for StoaHandler {
     }
 }
 
-/// Translate a `route_method` `Value` return into a handler `Result`.
-///
-/// `route_method` embeds method-level errors as `{"type": "<error-type>"}` or
-/// `{"error": "<message>"}` in the returned `Value`.  The Dispatcher contract
-/// requires errors to be `Err(JmapError)`.
-///
-/// # Precondition
-///
-/// Success responses returned by `route_method` **must not** contain a top-level
-/// `"type"` key.  If they do, this function will incorrectly treat them as errors.
-/// All current `route_method` handler arms satisfy this — the `"type"` key appears
-/// only in `MethodError`/`JmapError` objects.  New handlers must preserve this invariant.
-fn stoa_value_to_result(v: Value) -> Result<(Value, Vec<jmap_types::Invocation>), JmapError> {
-    if let Some(type_str) = v.get("type").and_then(|t| t.as_str()) {
-        let mut err = JmapError::custom(type_str);
-        err.description = v
-            .get("description")
-            .and_then(|d| d.as_str())
-            .map(str::to_string);
-        Err(err)
-    } else if v.get("error").is_some() {
-        Err(JmapError::server_fail("internal error"))
-    } else {
-        Ok((v, vec![]))
-    }
-}
-
 /// Resolve a username to its numeric `user_id` from the database.
 ///
 /// - `Ok(Some(id))` — user found.
@@ -622,18 +1007,19 @@ async fn resolve_user_id(pool: &sqlx::AnyPool, username: &str) -> Result<Option<
 
 /// Build the JMAP [`Dispatcher`] that routes all supported methods.
 ///
-/// All RFC 8621 Email/Mailbox/Thread/etc. methods and custom Stoa extensions route through a
-/// single [`StoaHandler`] that delegates to `route_method`.  The Dispatcher
-/// layer provides RFC 8620 ResultReference (`#`-prefix) resolution before each
-/// call, which the previous hand-rolled loop did not implement.
-fn build_jmap_dispatcher(stores: Arc<JmapStores>) -> Dispatcher<JmapCaller> {
+/// All RFC 8621 Email/Mailbox/Thread/etc. methods and custom Stoa extensions
+/// route through a single [`StoaHandler`].  The Dispatcher layer provides RFC
+/// 8620 ResultReference (`#`-prefix) resolution before each call.
+///
+/// Method names registered here that are not explicitly handled in
+/// `StoaHandler::call()` fall through to the `_ => unknownMethod` arm.
+/// That is intentional for unimplemented RFC 8621 stubs: they are registered
+/// so that the Dispatcher emits a well-formed `unknownMethod` response rather
+/// than a generic HTTP error.  To implement a stub, add a match arm in
+/// `StoaHandler::call()` — no change here is needed.
+fn build_jmap_dispatcher(stores: Arc<JmapStores>) -> OpaqueJmapDispatcher {
     let handler: Arc<dyn JmapHandler<JmapCaller>> = Arc::new(StoaHandler { stores });
 
-    // All method names to register with the Dispatcher.
-    // IMPORTANT: this list must be kept in sync with the match arms in `route_method`.
-    // A name missing here will cause the Dispatcher to return unknownMethod instead of
-    // dispatching to route_method, with no compile-time error.
-    // Unimplemented RFC 8621 names intentionally route to the `_` arm → unknownMethod.
     const METHODS: &[&str] = &[
         // RFC 8621 Mailbox
         "Mailbox/get",
@@ -681,7 +1067,7 @@ fn build_jmap_dispatcher(stores: Arc<JmapStores>) -> Dispatcher<JmapCaller> {
     for &method in METHODS {
         d.register(method, Arc::clone(&handler));
     }
-    d
+    OpaqueJmapDispatcher(d)
 }
 
 // ---------------------------------------------------------------------------
@@ -766,7 +1152,14 @@ async fn jmap_api_handler(
         slow_threshold_ms: state.slow_jmap_threshold_ms,
     };
 
-    let dispatcher = build_jmap_dispatcher(Arc::clone(jmap));
+    let owned;
+    let dispatcher = match state.jmap_dispatcher.as_ref() {
+        Some(d) => &d.0,
+        None => {
+            owned = build_jmap_dispatcher(Arc::clone(jmap));
+            &owned.0
+        }
+    };
     let response = dispatcher.dispatch(request, caller, session_state).await;
 
     match serde_json::to_value(response) {
@@ -775,431 +1168,6 @@ async fn jmap_api_handler(
             tracing::error!("jmap_api_handler: failed to serialize response: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
         }
-    }
-}
-
-async fn route_method(
-    method: &str,
-    args: Value,
-    jmap: &JmapStores,
-    canonical_account_id: &str,
-    server_start: std::time::Instant,
-    is_operator: bool,
-    user_id: i64,
-) -> Value {
-    // RFC 8621 §2: every method call carries an accountId.  If it is present
-    // and does not match the authenticated principal's account, return
-    // accountNotFound immediately without dispatching to the handler.
-    //
-    // An absent accountId is treated as the anonymous case and passed through;
-    // handlers that require it will return their own error if needed.
-    if let Some(requested_id) = args.get("accountId").and_then(|v| v.as_str()) {
-        if requested_id != canonical_account_id {
-            let err = crate::jmap::types::MethodError::account_not_found();
-            return serde_json::to_value(&err).unwrap_or(json!({}));
-        }
-    }
-
-    match method {
-        "Mailbox/set" => {
-            let old_state = jmap
-                .state_store
-                .get_state(user_id, "Mailbox")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-            let mut result = crate::mailbox::set::handle_mailbox_set(
-                &args,
-                user_id,
-                &jmap.subscription_store,
-                &jmap.article_numbers,
-                &old_state,
-                &old_state,
-            )
-            .await;
-            let any_created = result
-                .get("created")
-                .and_then(|v| v.as_object())
-                .map(|m| !m.is_empty())
-                .unwrap_or(false);
-            let any_destroyed = result
-                .get("destroyed")
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false);
-            if any_created || any_destroyed {
-                let new_state = jmap
-                    .state_store
-                    .bump_state(user_id, "Mailbox")
-                    .await
-                    .unwrap_or_else(|_| old_state.clone());
-                if let Some(obj) = result.as_object_mut() {
-                    obj.insert("newState".to_string(), serde_json::Value::String(new_state));
-                }
-            }
-            result
-        }
-
-        "Email/set" => {
-            let old_state = jmap
-                .state_store
-                .get_state(user_id, "Email")
-                .await
-                .unwrap_or_else(|_| "0".to_string());
-
-            let mut result = match crate::email::set::handle_email_set(args.clone(), &old_state) {
-                Ok(v) => v,
-                Err(e) => return serde_json::to_value(&e).unwrap_or(json!({})),
-            };
-
-            let mut any_changed = false;
-
-            // Handle keyword updates.
-            if let Some(update_map) = args.get("update").and_then(|v| v.as_object()) {
-                let (mut updated, not_updated) =
-                    crate::email::set::handle_keyword_update(update_map, user_id, &jmap.user_flags)
-                        .await;
-                // An id must not appear in both updated and notUpdated.
-                // handle_email_set may have already placed an id in notUpdated
-                // (e.g. for a mailboxIds conflict); remove those from updated here.
-                if let Some(already_not_updated) = result["notUpdated"].as_object() {
-                    for id in already_not_updated.keys() {
-                        updated.remove(id);
-                    }
-                }
-                if !updated.is_empty() {
-                    any_changed = true;
-                    result["updated"] = Value::Object(updated);
-                }
-                if !not_updated.is_empty() {
-                    let existing = result["notUpdated"]
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut merged = existing;
-                    merged.extend(not_updated);
-                    result["notUpdated"] = Value::Object(merged);
-                }
-            }
-
-            // Handle creates.
-            if let Some(create_map) = args.get("create").and_then(|v| v.as_object()) {
-                let known_groups = jmap.article_numbers.list_groups().await.unwrap_or_default();
-                let (created, not_created) = crate::email::set::handle_email_create(
-                    create_map,
-                    jmap.ipfs.as_ref(),
-                    &jmap.msgid_map,
-                    jmap.smtp_relay_queue.as_ref(),
-                    &known_groups,
-                )
-                .await;
-                if !created.is_empty() {
-                    any_changed = true;
-                    result["created"] = Value::Object(created);
-                }
-                if !not_created.is_empty() {
-                    result["notCreated"] = Value::Object(not_created);
-                }
-            }
-
-            // Set real oldState/newState; bump state if any write succeeded.
-            let new_state = if any_changed {
-                jmap.state_store
-                    .bump_state(user_id, "Email")
-                    .await
-                    .unwrap_or_else(|_| old_state.clone())
-            } else {
-                old_state.clone()
-            };
-            result["oldState"] = Value::String(old_state);
-            result["newState"] = Value::String(new_state.clone());
-
-            // Record changes in the change log for Email/changes.
-            let new_seq: i64 = new_state.parse().unwrap_or(0);
-            if let Some(created_obj) = result["created"].as_object() {
-                let new_cid_ids: Vec<String> = created_obj
-                    .values()
-                    .filter_map(|v| v.get("id"))
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_string)
-                    .collect();
-                if !new_cid_ids.is_empty() {
-                    if let Err(e) = jmap
-                        .change_log
-                        .record_created(user_id, "Email", &new_cid_ids, new_seq)
-                        .await
-                    {
-                        tracing::warn!("change_log.record_created failed: {e}");
-                    }
-                }
-            }
-            if let Some(updated_obj) = result["updated"].as_object() {
-                let updated_ids: Vec<String> = updated_obj.keys().cloned().collect();
-                if !updated_ids.is_empty() {
-                    if let Err(e) = jmap
-                        .change_log
-                        .record_updated(user_id, "Email", &updated_ids, new_seq)
-                        .await
-                    {
-                        tracing::warn!("change_log.record_updated failed: {e}");
-                    }
-                }
-            }
-
-            result
-        }
-
-        // RFC 9404 §4.1: Blob/get — return base64url-encoded raw block bytes
-        // for each requested blobId (CID).  Unknown CIDs go into notFound.
-        "Blob/get" => {
-            let ids: Vec<String> = args
-                .get("ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let mut list: Vec<Value> = Vec::new();
-            let mut not_found: Vec<String> = Vec::new();
-
-            for id in &ids {
-                let cid = match cid::Cid::try_from(id.as_str()) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        not_found.push(id.clone());
-                        continue;
-                    }
-                };
-                match jmap.ipfs.get_raw(&cid).await {
-                    Ok(bytes) => {
-                        let encoded = data_encoding::BASE64.encode(&bytes);
-                        list.push(json!({
-                            "id": id,
-                            "data:asBase64": encoded,
-                            "type": "message/rfc822",
-                            "size": bytes.len()
-                        }));
-                    }
-                    Err(stoa_reader::post::ipfs_write::IpfsWriteError::NotFound(_)) => {
-                        not_found.push(id.clone());
-                    }
-                    Err(e) => {
-                        tracing::warn!(blob_id = %id, "Blob/get IPFS error: {e}");
-                        not_found.push(id.clone());
-                    }
-                }
-            }
-
-            json!({
-                "accountId": canonical_account_id,
-                "list": list,
-                "notFound": not_found
-            })
-        }
-
-        // RFC 9404 §4.2: Blob/copy — in stoa, CIDs are global content addresses
-        // shared across all accounts.  Validate that each blobId is a parseable
-        // CIDv1 before reporting success; garbage strings go to notCopied.
-        "Blob/copy" => {
-            let from_account_id = args
-                .get("fromAccountId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let blob_ids: Vec<String> = args
-                .get("blobIds")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let mut copied: serde_json::Map<String, Value> = serde_json::Map::new();
-            let mut not_copied: serde_json::Map<String, Value> = serde_json::Map::new();
-            for id in &blob_ids {
-                if cid::Cid::try_from(id.as_str()).is_ok() {
-                    // Valid CID — globally accessible in stoa.
-                    copied.insert(id.clone(), Value::String(id.clone()));
-                } else {
-                    not_copied.insert(
-                        id.clone(),
-                        json!({"type": "blobNotFound", "description": "not a valid CID"}),
-                    );
-                }
-            }
-
-            json!({
-                "fromAccountId": from_account_id,
-                "accountId": canonical_account_id,
-                "copied": copied,
-                "notCopied": not_copied
-            })
-        }
-
-        // RFC 8621 §5.4: SearchSnippet/get — return highlighted snippets for
-        // email search matches.  Subject is sourced from the overview store;
-        // body preview is fetched from IPFS.  When no search index is configured
-        // or the filter has no "text" field, all snippets are returned as null.
-        "SearchSnippet/get" => {
-            let email_ids: Vec<String> = args
-                .get("emailIds")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let filter = args.get("filter").cloned();
-            let text_query = filter
-                .as_ref()
-                .and_then(|f| f.get("text"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            // Reverse-lookup: resolve each emailId CID to (group, article_num) on demand.
-            // Avoids loading all articles into memory — each lookup is a single indexed query.
-
-            let mut list: Vec<Value> = Vec::new();
-            let mut not_found: Vec<String> = Vec::new();
-
-            for email_id in &email_ids {
-                let cid = match cid::Cid::try_from(email_id.as_str()) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        not_found.push(email_id.clone());
-                        continue;
-                    }
-                };
-
-                let (subject_snip, preview_snip) =
-                    if text_query.is_empty() || jmap.search_index.is_none() {
-                        // No text query or no index — return null snippets.
-                        (None, None)
-                    } else if let Some((group, num)) = jmap
-                        .article_numbers
-                        .lookup_by_cid(&cid)
-                        .await
-                        .ok()
-                        .flatten()
-                    {
-                        let subject_text = jmap
-                            .overview_store
-                            .query_by_number(&group, num)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|r| r.subject)
-                            .unwrap_or_default();
-
-                        let body_text: String = async {
-                            let raw = match jmap.ipfs.get_raw(&cid).await {
-                                Ok(r) => r,
-                                Err(_) => return String::new(),
-                            };
-                            let root: stoa_core::ipld::root_node::ArticleRootNode =
-                                match serde_ipld_dagcbor::from_slice(&raw) {
-                                    Ok(r) => r,
-                                    Err(_) => return String::new(),
-                                };
-                            match jmap.ipfs.get_raw(&root.body_cid).await {
-                                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                                Err(_) => String::new(),
-                            }
-                        }
-                        .await;
-
-                        if let Some(ref idx) = jmap.search_index {
-                            idx.make_snippets(&text_query, &subject_text, &body_text)
-                        } else {
-                            (None, None)
-                        }
-                    } else {
-                        // CID not in article_numbers — silently omit.
-                        not_found.push(email_id.clone());
-                        continue;
-                    };
-
-                list.push(json!({
-                    "emailId": email_id,
-                    "subject": subject_snip,
-                    "preview": preview_snip,
-                }));
-            }
-
-            json!({
-                "accountId": canonical_account_id,
-                "filter": filter.unwrap_or(json!(null)),
-                "list": list,
-                "notFound": not_found,
-            })
-        }
-
-        // ── Admin methods (urn:ietf:params:jmap:usenet-ipfs-admin) ───────────────
-        // These methods are only accessible to users with the operator role.
-        // Non-operators receive a `forbidden` error.
-        "ServerStatus/get" => {
-            if !is_operator {
-                return serde_json::to_value(crate::jmap::types::MethodError::forbidden())
-                    .unwrap_or(json!({}));
-            }
-            let uptime_secs = server_start.elapsed().as_secs();
-            json!({
-                "accountId": canonical_account_id,
-                "status": {
-                    "uptime_secs": uptime_secs
-                }
-            })
-        }
-
-        "Peer/get" => {
-            if !is_operator {
-                return serde_json::to_value(crate::jmap::types::MethodError::forbidden())
-                    .unwrap_or(json!({}));
-            }
-            // Peer state is owned by stoa-transit; the JMAP server returns an
-            // empty list.  A future epic can wire transit admin state here.
-            json!({
-                "accountId": canonical_account_id,
-                "list": [],
-                "notFound": []
-            })
-        }
-
-        "GroupLog/get" => {
-            if !is_operator {
-                return serde_json::to_value(crate::jmap::types::MethodError::forbidden())
-                    .unwrap_or(json!({}));
-            }
-            let groups = match jmap.article_numbers.list_groups().await {
-                Ok(g) => g,
-                Err(e) => return json!({"error": e.to_string()}),
-            };
-            let list: Vec<Value> = groups
-                .iter()
-                .map(|(name, lo, hi)| {
-                    let count = if *hi < *lo { 0u64 } else { hi - lo + 1 };
-                    json!({
-                        "id": name,
-                        "name": name,
-                        "articleCount": count
-                    })
-                })
-                .collect();
-            json!({
-                "accountId": canonical_account_id,
-                "list": list,
-                "notFound": []
-            })
-        }
-
-        _ => serde_json::to_value(crate::jmap::types::MethodError::unknown_method())
-            .unwrap_or(json!({})),
     }
 }
 
@@ -1248,6 +1216,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(CredentialStore::empty()),
             auth_config: Arc::new(AuthConfig::default()),
             token_store: ts,
@@ -1268,6 +1237,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(CredentialStore::empty()),
             auth_config: Arc::new(AuthConfig::default()),
             token_store: ts,
@@ -1296,6 +1266,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(
                 CredentialStore::from_credentials(&users).expect("test setup: valid bcrypt hashes"),
             ),
@@ -1392,7 +1363,8 @@ mod tests {
         });
         let state = Arc::new(AppState {
             start_time: Instant::now(),
-            jmap: Some(stores),
+            jmap: Some(Arc::clone(&stores)),
+            jmap_dispatcher: Some(Arc::new(build_jmap_dispatcher(stores))),
             credential_store: Arc::new(CredentialStore::empty()),
             auth_config: Arc::new(AuthConfig::default()),
             token_store: Arc::new(TokenStore::new(Arc::clone(&mail_pool_arc))),
@@ -1431,6 +1403,7 @@ mod tests {
             // Clone all other fields unchanged.
             start_time: state.start_time,
             jmap: state.jmap.clone(),
+            jmap_dispatcher: state.jmap_dispatcher.clone(),
             token_store: state.token_store.clone(),
             oidc_store: state.oidc_store.clone(),
             base_url: state.base_url.clone(),
@@ -1949,6 +1922,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(CredentialStore::empty()),
             auth_config: Arc::new(AuthConfig::default()),
             token_store: make_token_store().await.0,
@@ -1993,6 +1967,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(CredentialStore::empty()),
             auth_config: Arc::new(AuthConfig::default()),
             token_store: make_token_store().await.0,
@@ -2414,6 +2389,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(
                 CredentialStore::from_credentials(&users).expect("test setup: valid bcrypt hashes"),
             ),
@@ -2661,37 +2637,6 @@ mod tests {
         assert!(json.contains("accountNotFound"), "got: {json}");
     }
 
-    /// Oracle: stoa_value_to_result contract — value with top-level "type" key is an error.
-    #[test]
-    fn stoa_value_to_result_detects_method_error() {
-        let v = serde_json::json!({"type": "accountNotFound"});
-        let result = stoa_value_to_result(v);
-        assert!(result.is_err(), "value with 'type' key must be Err");
-        let err = result.unwrap_err();
-        assert_eq!(err.error_type, "accountNotFound");
-    }
-
-    /// Oracle: stoa_value_to_result contract — value with top-level "error" key is serverFail.
-    #[test]
-    fn stoa_value_to_result_detects_internal_error() {
-        let v = serde_json::json!({"error": "db connection lost"});
-        let result = stoa_value_to_result(v);
-        assert!(result.is_err(), "value with 'error' key must be Err");
-        let err = result.unwrap_err();
-        assert_eq!(err.error_type, "serverFail");
-    }
-
-    /// Oracle: stoa_value_to_result contract — success value passes through unchanged.
-    #[test]
-    fn stoa_value_to_result_passes_success_value_through() {
-        let v = serde_json::json!({"accountId": "u_alice", "state": "s1", "list": []});
-        let result = stoa_value_to_result(v.clone());
-        assert!(result.is_ok(), "success value must be Ok");
-        let (out, extra) = result.unwrap();
-        assert_eq!(out, v);
-        assert!(extra.is_empty());
-    }
-
     // ── stoa-2xeks.20: /.well-known/mta-sts.txt handler tests ────────────────
 
     async fn mta_sts_state(
@@ -2701,6 +2646,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(CredentialStore::empty()),
             auth_config: Arc::new(AuthConfig::default()),
             token_store: ts,

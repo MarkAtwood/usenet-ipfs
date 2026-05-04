@@ -55,6 +55,7 @@ fn dev_app_state(token_store: Arc<TokenStore>) -> Arc<AppState> {
     Arc::new(AppState {
         start_time: Instant::now(),
         jmap: None,
+        jmap_dispatcher: None,
         credential_store: Arc::new(CredentialStore::empty()),
         auth_config: Arc::new(AuthConfig::default()),
         token_store,
@@ -78,6 +79,7 @@ fn auth_app_state_alice(token_store: Arc<TokenStore>) -> Arc<AppState> {
     Arc::new(AppState {
         start_time: Instant::now(),
         jmap: None,
+        jmap_dispatcher: None,
         credential_store: Arc::new(
             CredentialStore::from_credentials(&users).expect("test setup: valid bcrypt hashes"),
         ),
@@ -114,6 +116,7 @@ fn auth_app_state_two_users(token_store: Arc<TokenStore>) -> Arc<AppState> {
     Arc::new(AppState {
         start_time: Instant::now(),
         jmap: None,
+        jmap_dispatcher: None,
         credential_store: Arc::new(
             CredentialStore::from_credentials(&users).expect("test setup: valid bcrypt hashes"),
         ),

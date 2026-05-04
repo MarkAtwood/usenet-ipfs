@@ -206,6 +206,7 @@ mod tests {
         let state = Arc::new(AppState {
             start_time: Instant::now(),
             jmap: None,
+            jmap_dispatcher: None,
             credential_store: Arc::new(CredentialStore::empty()),
             auth_config: Arc::new(AuthConfig::default()),
             token_store: Arc::new(crate::token_store::TokenStore::new(Arc::new(pool))),

@@ -76,6 +76,7 @@ async fn state_no_jmap() -> Arc<AppState> {
     Arc::new(AppState {
         start_time: Instant::now(),
         jmap: None,
+        jmap_dispatcher: None,
         credential_store: Arc::new(CredentialStore::empty()),
         auth_config: Arc::new(AuthConfig::default()),
         token_store: Arc::new(TokenStore::new(Arc::new(mail_pool))),
@@ -139,6 +140,7 @@ async fn state_with_jmap() -> (
     let state = Arc::new(AppState {
         start_time: Instant::now(),
         jmap: Some(jmap),
+        jmap_dispatcher: None,
         credential_store: Arc::new(CredentialStore::empty()),
         auth_config: Arc::new(AuthConfig::default()),
         token_store: Arc::new(TokenStore::new(Arc::clone(&mail_pool_arc))),

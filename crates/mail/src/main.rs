@@ -149,6 +149,7 @@ async fn main() {
     let state = Arc::new(AppState {
         start_time,
         jmap: None,
+        jmap_dispatcher: None,
         credential_store: Arc::new(credential_store),
         auth_config: Arc::new(config.auth),
         token_store,
