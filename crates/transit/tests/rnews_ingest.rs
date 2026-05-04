@@ -49,19 +49,17 @@ fn make_timestamp() -> HlcTimestamp {
     }
 }
 
+// Duplicated from src/import/rnews.rs mod tests — keep in sync.
+// Rust cannot share test helpers across the lib/integration boundary.
 fn make_article(from: &str, newsgroups: &str, msgid: &str, subject: &str, body: &str) -> Vec<u8> {
     format!(
-        "From: {from}\r\n\
-         Newsgroups: {newsgroups}\r\n\
-         Message-ID: {msgid}\r\n\
-         Subject: {subject}\r\n\
-         Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
-         \r\n\
-         {body}\r\n"
+        "From: {from}\r\nNewsgroups: {newsgroups}\r\nMessage-ID: {msgid}\r\nSubject: {subject}\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\n\r\n{body}\r\n"
     )
     .into_bytes()
 }
 
+// Duplicated from src/import/rnews.rs mod tests — keep in sync.
+// Rust cannot share test helpers across the lib/integration boundary.
 fn make_batch(articles: &[Vec<u8>]) -> Vec<u8> {
     let mut batch = Vec::new();
     for art in articles {

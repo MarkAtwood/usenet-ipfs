@@ -110,11 +110,9 @@ pub fn parse_rnews_batch(input: &[u8]) -> Result<Vec<Vec<u8>>, RnewsError> {
         let decompressed = decompress_gunbatch(&input[GUNBATCH_MARKER.len()..])?;
         parse_rnews_batch_plain(&decompressed)
     } else if input.starts_with(CUNBATCH_MARKER) {
-        // propagate UnsupportedCompression immediately
-        decompress_cunbatch(&input[CUNBATCH_MARKER.len()..])?;
-        // decompress_cunbatch always returns Err, so this is unreachable,
-        // but the compiler needs a value here.
-        unreachable!()
+        return Err(RnewsError::UnsupportedCompression(
+            "cunbatch (Unix compress .Z) is not supported; use gunbatch (gzip) instead".to_string(),
+        ));
     } else {
         parse_rnews_batch_plain(input)
     }
@@ -235,6 +233,8 @@ mod tests {
 
     // ---- helpers for parse_rnews_batch tests ----
 
+    // Duplicated in tests/rnews_ingest.rs — keep in sync.
+    // Rust cannot share #[cfg(test)] helpers across the lib/integration boundary.
     fn make_article(
         from: &str,
         newsgroups: &str,
@@ -248,6 +248,8 @@ mod tests {
         .into_bytes()
     }
 
+    // Duplicated in tests/rnews_ingest.rs — keep in sync.
+    // Rust cannot share #[cfg(test)] helpers across the lib/integration boundary.
     fn make_batch(articles: &[Vec<u8>]) -> Vec<u8> {
         let mut batch = Vec::new();
         for art in articles {

@@ -42,26 +42,20 @@ fn print_usage() {
 }
 
 fn parse_args() -> Args {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args = std::env::args().skip(1).peekable();
     let mut config_path: Option<PathBuf> = None;
     let mut check_only = false;
-    let mut i = 1;
 
-    while i < args.len() {
-        match args[i].as_str() {
-            "--config" => {
-                if let Some(path) = args.get(i + 1) {
-                    config_path = Some(PathBuf::from(path));
-                    i += 2;
-                } else {
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => match args.next() {
+                Some(path) => config_path = Some(PathBuf::from(path)),
+                None => {
                     eprintln!("error: --config requires a path argument");
                     std::process::exit(1);
                 }
-            }
-            "--check" => {
-                check_only = true;
-                i += 1;
-            }
+            },
+            "--check" => check_only = true,
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -205,11 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .unwrap_or_else(resolve_local_hostname);
 
-    // Build HLC clock.
-    let hlc = {
+    // Build HLC clock. Owned locally; each article gets a timestamp via send().
+    let mut hlc = {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .unwrap_or_default() // safe: only fails if system clock is before 1970, which cannot happen in practice
             .as_millis() as u64;
         let node_id = ensure_instance_node_id(&transit_pool, &hostname).await;
         match load_hlc_checkpoint(&transit_pool).await {
@@ -221,8 +215,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-    // The HLC is owned locally; each article gets a timestamp via send().
-    let mut hlc = hlc;
 
     // --check: config validated, infrastructure reachable — exit 0.
     if args.check_only {
@@ -289,7 +281,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             IngestResult::Accepted => {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
+                    .unwrap_or_default() // safe: only fails if system clock is before 1970, which cannot happen in practice
                     .as_millis() as u64;
                 let timestamp = hlc.send(now_ms);
 

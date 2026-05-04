@@ -29,6 +29,12 @@ use crate::wildmat::GroupPolicy;
 /// pipeline for per-group work.
 pub const MAX_NEWSGROUPS: usize = 100;
 
+/// Maximum length in bytes of a header field value (RFC 5322 §2.1.1 line-length limit).
+pub const MAX_HEADER_VALUE: usize = 998;
+
+/// Maximum length in bytes of a header field name.
+pub const MAX_HEADER_NAME: usize = 76;
+
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Configuration for article ingress validation.
@@ -141,14 +147,14 @@ pub fn validate_message_id(id: &str) -> Result<(), ValidationError> {
 /// is needed, it is added here once and applies to both paths automatically.
 ///
 /// # Checks (in order)
-/// 1. The 5 mandatory RFC 5536 headers (From, Date, Message-ID, Subject, Path)
-///    present and non-empty; Newsgroups is the 6th mandatory header, checked
-///    separately in step 3 below
+/// 1. The 5 mandatory RFC 5536 headers (From, Date, Message-ID, Subject, Path):
+///    present, ≤ 998 bytes, no NUL/CR/LF; Newsgroups is the 6th mandatory
+///    header, checked separately in step 3 below
 /// 2. Message-ID format valid: must match `<local@domain>` with no whitespace
 /// 3. Newsgroups not empty; crosspost count ≤ `MAX_NEWSGROUPS`; group name
 ///    format is guaranteed by the `GroupName` type at construction time
 /// 4. If `config.allowed_groups` is `Some`, at least one group must match the filter
-/// 5. All header field values ≤ 998 bytes (RFC 5322 §2.1.1)
+/// 5. Extra header field names and values: character validity (RFC 5322 §2.2)
 /// 6. Article body size ≤ `config.max_article_bytes`
 pub fn validate_article_ingress(
     article: &Article,
@@ -156,21 +162,47 @@ pub fn validate_article_ingress(
 ) -> Result<(), ProtocolError> {
     let h = &article.header;
 
-    // 1. Mandatory headers present and non-empty.
-    if h.from.is_empty() {
-        return Err(ValidationError::MissingMandatoryHeader("From".into()).into());
-    }
-    if h.date.is_empty() {
-        return Err(ValidationError::MissingMandatoryHeader("Date".into()).into());
-    }
-    if h.message_id.is_empty() {
-        return Err(ValidationError::MissingMandatoryHeader("Message-ID".into()).into());
-    }
-    if h.subject.is_empty() {
-        return Err(ValidationError::MissingMandatoryHeader("Subject".into()).into());
-    }
-    if h.path.is_empty() {
-        return Err(ValidationError::MissingMandatoryHeader("Path".into()).into());
+    // 1. Mandatory headers: presence, length, and character validity in one pass.
+    //    Add new mandatory headers here only — do not add separate presence checks.
+    //
+    // PRECONDITION: callers MUST unfold RFC 5322 obs-fold (CRLF followed by
+    // whitespace) before constructing the `Article` passed to this function.
+    // Any NNTP POST or IHAVE path must perform unfolding before Article
+    // construction so the header values stored in the struct are already flat.
+    // If a caller forgets to unfold, a folded header (containing CRLF+WSP)
+    // will be REJECTED here by the bare-CR/LF check — this is intentional.
+    // Folded headers in the `Article` struct would corrupt canonical
+    // serialisation and break downstream line-oriented parsers.
+    //
+    // NUL (\x00) is forbidden in all header values. The canonical serialiser
+    // uses "\x00\n" as the header/body separator; a NUL byte in a header value
+    // would corrupt the canonical stream and produce an incorrect CID.
+    let mandatory_fields: &[(&str, &str)] = &[
+        ("From", h.from.as_str()),
+        ("Date", h.date.as_str()),
+        ("Message-ID", h.message_id.as_str()),
+        ("Subject", h.subject.as_str()),
+        ("Path", h.path.as_str()),
+    ];
+    for (name, value) in mandatory_fields {
+        if value.is_empty() {
+            return Err(ValidationError::MissingMandatoryHeader((*name).into()).into());
+        }
+        if value.len() > MAX_HEADER_VALUE {
+            return Err(ValidationError::HeaderFieldTooLong {
+                field: (*name).into(),
+                len: value.len(),
+                limit: MAX_HEADER_VALUE,
+            }
+            .into());
+        }
+        if value.contains('\x00') || value.contains('\r') || value.contains('\n') {
+            return Err(ValidationError::InvalidHeaderValue {
+                field: (*name).into(),
+                reason: "NUL byte or bare CR/LF forbidden in header values (RFC 5322 §2.2)".into(),
+            }
+            .into());
+        }
     }
 
     // 2. Message-ID format.
@@ -203,50 +235,11 @@ pub fn validate_article_ingress(
         }
     }
 
-    // 5. Header field values ≤ 998 bytes (RFC 5322 §2.1.1); no bare CR/LF or NUL.
+    // 5. Extra-header names and values: RFC 5322 §2.2 character validity.
     //
-    // PRECONDITION: callers MUST unfold RFC 5322 obs-fold (CRLF followed by
-    // whitespace) before constructing the `Article` passed to this function.
-    // Any NNTP POST or IHAVE path must perform unfolding before Article
-    // construction so the header values stored in the struct are already flat.
-    // If a caller forgets to unfold, a folded header (containing CRLF+WSP)
-    // will be REJECTED here by the bare-CR/LF check — this is intentional.
-    // Folded headers in the `Article` struct would corrupt canonical
-    // serialisation and break downstream line-oriented parsers.
-    //
-    // NUL (\x00) is forbidden in all header values. The canonical serialiser
-    // uses "\x00\n" as the header/body separator; a NUL byte in a header value
-    // would corrupt the canonical stream and produce an incorrect CID.
-    const MAX_HEADER_VALUE: usize = 998;
-
-    let mandatory_fields = [
-        ("From", h.from.as_str()),
-        ("Date", h.date.as_str()),
-        ("Message-ID", h.message_id.as_str()),
-        ("Subject", h.subject.as_str()),
-        ("Path", h.path.as_str()),
-    ];
-    for (name, value) in mandatory_fields {
-        if value.len() > MAX_HEADER_VALUE {
-            return Err(ValidationError::HeaderFieldTooLong {
-                field: name.into(),
-                len: value.len(),
-                limit: MAX_HEADER_VALUE,
-            }
-            .into());
-        }
-        if value.contains('\x00') || value.contains('\r') || value.contains('\n') {
-            return Err(ValidationError::InvalidHeaderValue {
-                field: name.into(),
-                reason: "NUL byte or bare CR/LF forbidden in header values (RFC 5322 §2.2)".into(),
-            }
-            .into());
-        }
-    }
     // RFC 5322 §2.2: header names are printable US-ASCII (33–126) excluding
     // colon; a name with embedded CR/LF/NUL/colon would corrupt the canonical
     // byte stream used for signing.
-    const MAX_HEADER_NAME: usize = 76;
     for (name, value) in &h.extra_headers {
         if name.is_empty() {
             return Err(ValidationError::InvalidHeaderValue {
