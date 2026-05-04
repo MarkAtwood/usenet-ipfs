@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Ordering: wall_ms first, then logical counter, then node_id (lexicographic).
 /// Field declaration order matches comparison priority — derived Ord is correct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HlcTimestamp {
     pub wall_ms: u64,
     pub logical: u32,

@@ -32,7 +32,6 @@ fn cid_from_bytes(bytes: &[u8]) -> Result<Cid, StorageError> {
 
 impl LogStorage for SqliteLogStorage {
     async fn insert_entry(&self, id: LogEntryId, entry: LogEntry) -> Result<(), StorageError> {
-        let id_bytes = id.as_bytes().to_vec();
         let article_cid_bytes = entry.article_cid.to_bytes();
         // HLC timestamps are stored as wall_ms (u64) in the DB column (i64).
         // logical and node_id are not persisted — they are used only for
@@ -57,7 +56,7 @@ impl LogStorage for SqliteLogStorage {
             "INSERT INTO log_entries (id, hlc_timestamp, article_cid, operator_signature)
              VALUES (?, ?, ?, ?)",
         )
-        .bind(&id_bytes)
+        .bind(id.as_bytes() as &[u8])
         .bind(ts)
         .bind(&article_cid_bytes)
         .bind(&entry.operator_signature)
@@ -78,7 +77,7 @@ impl LogStorage for SqliteLogStorage {
                 "INSERT INTO log_entry_parents (entry_id, parent_id) VALUES (?, ?)
                  ON CONFLICT DO NOTHING",
             )
-            .bind(&id_bytes)
+            .bind(id.as_bytes() as &[u8])
             .bind(&parent_bytes)
             .execute(&mut *tx)
             .await
@@ -90,13 +89,11 @@ impl LogStorage for SqliteLogStorage {
     }
 
     async fn get_entry(&self, id: &LogEntryId) -> Result<Option<LogEntry>, StorageError> {
-        let id_bytes = id.as_bytes().to_vec();
-
         let row: Option<(i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(
             "SELECT hlc_timestamp, article_cid, operator_signature
              FROM log_entries WHERE id = ?",
         )
-        .bind(&id_bytes)
+        .bind(id.as_bytes() as &[u8])
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -110,7 +107,7 @@ impl LogStorage for SqliteLogStorage {
         // Fetch parent CIDs.
         let parent_rows: Vec<(Vec<u8>,)> =
             sqlx::query_as("SELECT parent_id FROM log_entry_parents WHERE entry_id = ?")
-                .bind(&id_bytes)
+                .bind(id.as_bytes() as &[u8])
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -145,9 +142,8 @@ impl LogStorage for SqliteLogStorage {
     }
 
     async fn has_entry(&self, id: &LogEntryId) -> Result<bool, StorageError> {
-        let id_bytes = id.as_bytes().to_vec();
         let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM log_entries WHERE id = ? LIMIT 1")
-            .bind(&id_bytes)
+            .bind(id.as_bytes() as &[u8])
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -158,12 +154,10 @@ impl LogStorage for SqliteLogStorage {
         &self,
         id: &LogEntryId,
     ) -> Result<Option<Vec<cid::Cid>>, StorageError> {
-        let id_bytes = id.as_bytes().to_vec();
-
         // First check if the entry exists at all.
         let exists: Option<(i64,)> =
             sqlx::query_as("SELECT 1 FROM log_entries WHERE id = ? LIMIT 1")
-                .bind(&id_bytes)
+                .bind(id.as_bytes() as &[u8])
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -174,7 +168,7 @@ impl LogStorage for SqliteLogStorage {
         // Fetch only the parent CIDs — skip hlc_timestamp, article_cid, operator_signature.
         let parent_rows: Vec<(Vec<u8>,)> =
             sqlx::query_as("SELECT parent_id FROM log_entry_parents WHERE entry_id = ?")
-                .bind(&id_bytes)
+                .bind(id.as_bytes() as &[u8])
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -224,7 +218,7 @@ impl LogStorage for SqliteLogStorage {
             let mut qb = sqlx::QueryBuilder::new("INSERT INTO group_tips (group_name, tip_id) ");
             qb.push_values(tips, |mut b, tip| {
                 b.push_bind(group.as_str())
-                    .push_bind(tip.as_bytes().to_vec());
+                    .push_bind(tip.as_bytes() as &[u8]);
             });
             qb.build().execute(&mut *tx).await.map_err(db_err)?;
         }
@@ -250,18 +244,17 @@ impl LogStorage for SqliteLogStorage {
             qb.push(" AND tip_id IN (");
             let mut sep = qb.separated(", ");
             for p in parents_to_remove {
-                sep.push_bind(p.as_bytes().to_vec());
+                sep.push_bind(p.as_bytes() as &[u8]);
             }
             sep.push_unseparated(")");
             qb.build().execute(&mut *tx).await.map_err(db_err)?;
         }
 
-        let new_tip_bytes = new_tip.as_bytes().to_vec();
         sqlx::query(
             "INSERT INTO group_tips (group_name, tip_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
         )
         .bind(group_name)
-        .bind(&new_tip_bytes)
+        .bind(new_tip.as_bytes() as &[u8])
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -278,7 +271,6 @@ impl LogStorage for SqliteLogStorage {
         parents_to_remove: &[LogEntryId],
         new_tip: &LogEntryId,
     ) -> Result<(), StorageError> {
-        let id_bytes = id.as_bytes().to_vec();
         let article_cid_bytes = entry.article_cid.to_bytes();
         let ts = i64::try_from(entry.hlc_timestamp.wall_ms).map_err(|_| {
             StorageError::Database(format!(
@@ -294,7 +286,7 @@ impl LogStorage for SqliteLogStorage {
             "INSERT INTO log_entries (id, hlc_timestamp, article_cid, operator_signature)
              VALUES (?, ?, ?, ?)",
         )
-        .bind(&id_bytes)
+        .bind(id.as_bytes() as &[u8])
         .bind(ts)
         .bind(&article_cid_bytes)
         .bind(&entry.operator_signature)
@@ -316,7 +308,7 @@ impl LogStorage for SqliteLogStorage {
                 "INSERT INTO log_entry_parents (entry_id, parent_id) VALUES (?, ?)
                  ON CONFLICT DO NOTHING",
             )
-            .bind(&id_bytes)
+            .bind(id.as_bytes() as &[u8])
             .bind(&parent_bytes)
             .execute(&mut *tx)
             .await
@@ -330,19 +322,18 @@ impl LogStorage for SqliteLogStorage {
             qb.push(" AND tip_id IN (");
             let mut sep = qb.separated(", ");
             for p in parents_to_remove {
-                sep.push_bind(p.as_bytes().to_vec());
+                sep.push_bind(p.as_bytes() as &[u8]);
             }
             sep.push_unseparated(")");
             qb.build().execute(&mut *tx).await.map_err(db_err)?;
         }
 
         // INSERT new tip.
-        let new_tip_bytes = new_tip.as_bytes().to_vec();
         sqlx::query(
             "INSERT INTO group_tips (group_name, tip_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
         )
         .bind(group.as_str())
-        .bind(&new_tip_bytes)
+        .bind(new_tip.as_bytes() as &[u8])
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
