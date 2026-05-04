@@ -178,6 +178,11 @@ fn parse_rnews_batch_plain(input: &[u8]) -> Result<Vec<Vec<u8>>, RnewsError> {
             )));
         }
 
+        // Each article is copied into a new Vec. For a max-size uncompressed
+        // batch (1000 × 1 MiB) this doubles peak RSS vs. holding slices into
+        // the original input. Eliminating the copy requires changing
+        // parse_rnews_batch's public signature to Vec<&'a [u8]>, which is a
+        // breaking API change deferred to a future refactor (stoa-paxfh.14).
         articles.push(input[pos..article_end].to_vec());
         pos = article_end;
 

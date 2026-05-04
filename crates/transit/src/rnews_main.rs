@@ -144,24 +144,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Open pools.
-    let core_pool = Arc::new(
+    // AnyPool is internally reference-counted; no Arc wrapper needed.
+    let core_pool: sqlx::AnyPool =
         match stoa_core::db_pool::try_open_any_pool(&config.database.core_url, 3).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("error: failed to open core pool: {e}");
                 std::process::exit(1);
             }
-        },
-    );
-    let transit_pool = Arc::new(
+        };
+    let transit_pool: sqlx::AnyPool =
         match stoa_core::db_pool::try_open_any_pool(&config.database.url, 3).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("error: failed to open transit pool: {e}");
                 std::process::exit(1);
             }
-        },
-    );
+        };
 
     // Build IPFS store.
     let ipfs_store = match build_store_for_rnews(&config).await {
@@ -173,8 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build msgid_map and log_storage.
-    let msgid_map = MsgIdMap::new((*core_pool).clone());
-    let log_storage = SqliteLogStorage::new((*core_pool).clone());
+    let msgid_map = MsgIdMap::new(core_pool.clone());
+    let log_storage = SqliteLogStorage::new(core_pool.clone());
 
     // Load or generate signing key.
     let signing_key = Arc::new(match config.operator.signing_key_path.as_deref() {
@@ -263,6 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total = articles.len();
     let mut accepted: u64 = 0;
+    let mut filtered: u64 = 0;
     let mut duplicates: u64 = 0;
     let mut rejected: u64 = 0;
     let mut transient: u64 = 0;
@@ -314,8 +314,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 {
                     Ok((result, _metrics)) => {
-                        tracing::info!(cid = %result.cid, msgid = %message_id, "article accepted");
-                        accepted += 1;
+                        if result.groups.is_empty() {
+                            tracing::warn!(
+                                cid = %result.cid,
+                                msgid = %message_id,
+                                "article stored but has no group log entries \
+                                 (all Newsgroups rejected by group filter); \
+                                 article is invisible to NNTP readers"
+                            );
+                            filtered += 1;
+                        } else {
+                            tracing::info!(cid = %result.cid, msgid = %message_id, "article accepted");
+                            accepted += 1;
+                        }
                     }
                     Err(PipelineError::Permanent(msg)) => {
                         tracing::warn!(msgid = %message_id, "pipeline permanent error: {msg}");
@@ -342,9 +353,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if rejected > 0 || transient > 0 {
+    if rejected > 0 || transient > 0 || filtered > 0 {
         tracing::warn!(
             accepted,
+            filtered,
             duplicates,
             rejected,
             transient_errors = transient,
@@ -354,6 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!(
             accepted,
+            filtered,
             duplicates,
             rejected,
             transient_errors = transient,
@@ -382,9 +395,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Tries `/etc/hostname` first (reliable on Linux), then falls back to `"localhost"`.
 /// Operators should set `operator.hostname` in config to avoid this fallback.
 fn resolve_local_hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
+    let name = std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "localhost".to_owned())
+        .filter(|s| !s.is_empty());
+
+    match name {
+        Some(h) => h,
+        None => {
+            tracing::warn!(
+                "operator.hostname not set and /etc/hostname is empty; \
+                 using 'localhost' for Path: header — set operator.hostname \
+                 in config for production deployments"
+            );
+            "localhost".to_owned()
+        }
+    }
 }

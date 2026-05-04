@@ -127,25 +127,14 @@ where
 }
 
 /// Extract Message-ID from raw article bytes.
-/// Looks for `Message-ID:` header in the headers section (before first blank line).
+///
+/// Delegates to [`crate::peering::ingestion::extract_body_msgid`], which
+/// handles RFC 5322 §2.2.3 header folding (continuation lines beginning with
+/// SP or HTAB).  The previous implementation used `String::from_utf8_lossy` +
+/// `.lines()` and missed folded headers, causing folded-Message-ID articles to
+/// be counted as `skipped_not_article` during disaster-recovery reindex.
 pub fn extract_message_id_bytes(raw: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(raw);
-    for line in text.lines() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some(rest) = line
-            .get(..11)
-            .filter(|p| p.eq_ignore_ascii_case("message-id:"))
-            .map(|_| &line[11..])
-        {
-            let id = rest.trim();
-            if !id.is_empty() {
-                return Some(id.to_string());
-            }
-        }
-    }
-    None
+    crate::peering::ingestion::extract_body_msgid(raw)
 }
 
 #[cfg(test)]
@@ -246,5 +235,17 @@ mod tests {
     fn extract_message_id_bytes_returns_none_when_missing() {
         let raw = b"From: a@b.com\r\nSubject: No ID\r\n\r\nBody\r\n";
         assert_eq!(extract_message_id_bytes(raw), None);
+    }
+
+    #[test]
+    fn extract_message_id_bytes_handles_folded_header() {
+        // RFC 5322 §2.2.3: value entirely on a continuation line (SP-prefixed).
+        // The old .lines() implementation returned None for this input.
+        let raw = b"From: a@b.com\r\nMessage-ID:\r\n <folded@test.com>\r\n\r\nBody\r\n";
+        assert_eq!(
+            extract_message_id_bytes(raw).as_deref(),
+            Some("<folded@test.com>"),
+            "folded Message-ID must be extracted by reindex path"
+        );
     }
 }

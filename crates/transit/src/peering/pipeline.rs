@@ -37,7 +37,7 @@ use multihash_codetable::{Code, MultihashDigest};
 use sqlx::AnyPool;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime};
 use stoa_core::{
     article::GroupName,
     canonical::log_entry_canonical_bytes,
@@ -483,8 +483,16 @@ pub async fn verify_article(
     };
     let all_verifications: Vec<_> = x_sig_results.into_iter().chain(dkim_results).collect();
     let verified_at_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|e| {
+            // System clock is before 1970 — this should never happen in production.
+            // Fall back to 1 ms (not 0) so GC grace period is not immediately expired.
+            tracing::warn!(
+                error = %e,
+                "system clock is before Unix epoch; verified_at_ms will be incorrect"
+            );
+            std::time::Duration::from_millis(1)
+        })
         .as_millis() as i64;
     if let Err(e) = store
         .record_verifications(cid, &all_verifications, verified_at_ms)
@@ -719,8 +727,16 @@ where
         // replaces the stored list rather than silently keeping the first.
         let all_groups = group_name_strs.join(",");
         let ingested_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|e| {
+                // System clock is before 1970 — this should never happen in production.
+                // Fall back to 1 ms (not 0) so GC grace period is not immediately expired.
+                tracing::error!(
+                    error = %e,
+                    "system clock is before Unix epoch; ingested_at_ms will be incorrect"
+                );
+                std::time::Duration::from_millis(1)
+            })
             .as_millis() as i64;
         let byte_count = article_bytes.len() as i64;
         sqlx::query(
@@ -897,6 +913,7 @@ fn extract_message_id(article_bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use std::time::UNIX_EPOCH;
     use stoa_core::wildmat::GroupFilter;
 
     async fn make_transit_pool() -> (AnyPool, tempfile::TempPath) {
