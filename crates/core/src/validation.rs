@@ -86,7 +86,11 @@ fn is_valid_message_id(id: &str) -> bool {
     // serialiser uses "\x00\n" as the header/body separator.  The explicit '\0'
     // check in `forbidden` is intentional; do NOT simplify to `is_whitespace()`
     // alone even if a linter suggests it.
-    let forbidden = |c: char| c.is_whitespace() || c == '<' || c == '>' || c == '\0';
+    //
+    // The bound `<= 0x20` (not `< 0x20`) is intentional: it covers all C0
+    // controls (0x00–0x1F) *and* space (0x20), which is also forbidden in a
+    // Message-ID local or domain part.  DEL (0x7F) is rejected explicitly.
+    let forbidden = |c: char| (c as u32) <= 0x20 || c == '<' || c == '>' || c as u32 == 0x7f;
 
     if local.chars().any(forbidden) || domain.chars().any(forbidden) {
         return false;
@@ -810,5 +814,20 @@ mod tests {
     fn test_check_duplicate_returns_ok_for_unknown() {
         let store = InMemoryMsgIdStore(HashSet::new());
         assert!(check_duplicate("<new@example.com>", &store).is_ok());
+    }
+
+    #[test]
+    fn validate_message_id_rejects_control_char_0x01() {
+        assert!(!is_valid_message_id("<\x01@example.com>"));
+    }
+
+    #[test]
+    fn validate_message_id_rejects_control_char_0x1f() {
+        assert!(!is_valid_message_id("<test\x1f@example.com>"));
+    }
+
+    #[test]
+    fn validate_message_id_rejects_del_0x7f() {
+        assert!(!is_valid_message_id("<test\x7f@example.com>"));
     }
 }

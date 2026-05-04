@@ -925,7 +925,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                         }
                         let groups = match stores.article_numbers.list_groups().await {
                             Ok(g) => g,
-                            Err(e) => return Err(JmapError::server_fail(&e.to_string())),
+                            Err(e) => return Err(JmapError::server_fail(e.to_string())),
                         };
                         let list: Vec<Value> = groups
                             .iter()

@@ -10,6 +10,7 @@ use crate::article::GroupName;
 use crate::error::StorageError;
 use crate::group_log::storage::LogStorage;
 use crate::group_log::types::{LogEntry, LogEntryId};
+use crate::hlc::HlcTimestamp;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -20,7 +21,11 @@ fn test_cid(data: &[u8]) -> Cid {
 
 fn make_entry(seed: &[u8]) -> LogEntry {
     LogEntry {
-        hlc_timestamp: 1_700_000_000_000,
+        hlc_timestamp: HlcTimestamp {
+            wall_ms: 1_700_000_000_000,
+            logical: 0,
+            node_id: [0; 8],
+        },
         article_cid: test_cid(seed),
         operator_signature: vec![0xde, 0xad, 0xbe, 0xef],
         parent_cids: vec![],

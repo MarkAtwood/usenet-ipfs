@@ -140,7 +140,7 @@ impl JmapBackend for StoaBackend {
             return Ok((found_o, not_found));
         }
 
-        Ok((vec![], ids.unwrap_or(&[]).iter().cloned().collect()))
+        Ok((vec![], ids.unwrap_or(&[]).to_vec()))
     }
 
     async fn get_state<O: JmapObject + Send + Sync>(

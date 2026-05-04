@@ -64,7 +64,7 @@ pub async fn reconcile<S: LogStorage>(
     let mut want: Vec<LogEntryId> = Vec::new();
     for tip_id in remote_tips {
         if !storage.has_entry(tip_id).await? {
-            want.push(tip_id.clone());
+            want.push(*tip_id);
         }
     }
 
@@ -93,7 +93,7 @@ pub async fn reconcile<S: LogStorage>(
         }
 
         if !remote_set.contains(&key) {
-            have.push(entry_id.clone());
+            have.push(entry_id);
             if have.len() >= MAX_HAVE {
                 partial_have = !queue.is_empty();
                 break;
@@ -127,6 +127,7 @@ mod tests {
     use crate::group_log::mem_storage::MemLogStorage;
     use crate::group_log::storage::LogStorage;
     use crate::group_log::types::{LogEntry, LogEntryId};
+    use crate::hlc::HlcTimestamp;
 
     fn test_group() -> GroupName {
         GroupName::new("comp.lang.rust").unwrap()
@@ -148,7 +149,11 @@ mod tests {
     /// `append.rs`).
     fn make_entry(hlc: u64, article_seed: &[u8], parents: Vec<Cid>) -> LogEntry {
         LogEntry {
-            hlc_timestamp: hlc,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: hlc,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: Cid::new_v1(0x71, Code::Sha2_256.digest(article_seed)),
             operator_signature: vec![],
             parent_cids: parents,

@@ -289,10 +289,7 @@ pub(crate) fn check_bearer_token(auth_header: Option<&str>, bearer_token: Option
         None => true,
         Some(token) => {
             let expected = format!("Bearer {token}");
-            let header = match auth_header {
-                None => "",
-                Some(h) => h,
-            };
+            let header = auth_header.unwrap_or_default();
             // NOTE: subtle::ConstantTimeEq on slices of different lengths returns 0
             // immediately without comparing bytes, leaking the expected token length
             // through response timing.  We equalise lengths by zero-padding both

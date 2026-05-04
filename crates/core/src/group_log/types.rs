@@ -1,4 +1,5 @@
 use crate::article::GroupName;
+use crate::hlc::HlcTimestamp;
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -41,7 +42,7 @@ impl LogEntryId {
         use crate::canonical::entry_id_bytes;
         use multihash_codetable::{Code, MultihashDigest};
         let input = entry_id_bytes(
-            entry.hlc_timestamp,
+            entry.hlc_timestamp.wall_ms,
             &entry.article_cid,
             &entry.operator_signature,
             &entry.parent_cids,
@@ -75,8 +76,12 @@ impl fmt::Debug for LogEntryId {
 /// merge of concurrent branches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogEntry {
-    /// Hybrid Logical Clock timestamp (milliseconds since Unix epoch).
-    pub hlc_timestamp: u64,
+    /// Hybrid Logical Clock timestamp (full: wall_ms, logical counter, node_id).
+    ///
+    /// All three components are stored and used for CRDT ordering.  Two entries
+    /// with the same wall_ms are ordered by logical counter, then by node_id,
+    /// so concurrent events from different nodes are always totally ordered.
+    pub hlc_timestamp: HlcTimestamp,
     /// CID of the article stored in IPFS.
     pub article_cid: Cid,
     /// Ed25519 signature by the operator key over the canonical entry bytes.
@@ -139,13 +144,20 @@ mod tests {
     #[test]
     fn log_entry_construction() {
         let cid = test_cid(b"article-data");
+        let ts = HlcTimestamp {
+            wall_ms: 1_700_000_000_000,
+            logical: 7,
+            node_id: [0xAB; 8],
+        };
         let entry = LogEntry {
-            hlc_timestamp: 1_700_000_000_000,
+            hlc_timestamp: ts,
             article_cid: cid.clone(),
             operator_signature: vec![1, 2, 3, 4],
             parent_cids: vec![],
         };
-        assert_eq!(entry.hlc_timestamp, 1_700_000_000_000);
+        assert_eq!(entry.hlc_timestamp.wall_ms, 1_700_000_000_000);
+        assert_eq!(entry.hlc_timestamp.logical, 7);
+        assert_eq!(entry.hlc_timestamp.node_id, [0xAB; 8]);
         assert_eq!(entry.article_cid, cid);
         assert_eq!(entry.operator_signature, vec![1, 2, 3, 4]);
         assert!(entry.parent_cids.is_empty());
@@ -157,7 +169,11 @@ mod tests {
         let parent2 = test_cid(b"parent2");
         let article = test_cid(b"article");
         let entry = LogEntry {
-            hlc_timestamp: 42,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 42,
+                logical: 0,
+                node_id: [0x01; 8],
+            },
             article_cid: article,
             operator_signature: vec![],
             parent_cids: vec![parent1.clone(), parent2.clone()],

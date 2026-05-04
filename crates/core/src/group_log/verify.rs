@@ -5,6 +5,7 @@ use crate::canonical::log_entry_canonical_bytes;
 use crate::error::{SigningError, StorageError};
 use crate::group_log::storage::LogStorage;
 use crate::group_log::types::{LogEntry, LogEntryId};
+use crate::hlc::HlcTimestamp;
 use crate::signing::{verify, VerifyingKey};
 
 use ed25519_dalek::Signature;
@@ -76,8 +77,8 @@ pub enum VerifyError {
     InvalidSignature(SigningError),
     MissingParent(String),
     HlcNotMonotonic {
-        entry: u64,
-        parent: u64,
+        entry: HlcTimestamp,
+        parent: HlcTimestamp,
     },
     /// The provided `entry_id` does not match the SHA2-256 of the entry's
     /// canonical bytes.  Indicates the entry was tampered with or the wrong
@@ -101,7 +102,7 @@ impl std::fmt::Display for VerifyError {
             Self::MissingParent(cid) => write!(f, "parent entry not found: {cid}"),
             Self::HlcNotMonotonic { entry, parent } => write!(
                 f,
-                "HLC not monotonic: entry timestamp {entry} <= parent timestamp {parent}"
+                "HLC not monotonic: entry timestamp {entry:?} <= parent timestamp {parent:?}"
             ),
             Self::EntryIdMismatch => {
                 write!(f, "entry ID does not match entry content hash")
@@ -159,8 +160,11 @@ pub fn verify_signature(
 
 /// Shared signature check over canonical log entry bytes.
 fn check_signature(entry: &LogEntry, pubkey: &VerifyingKey) -> Result<(), VerifyError> {
-    let canonical =
-        log_entry_canonical_bytes(entry.hlc_timestamp, &entry.article_cid, &entry.parent_cids);
+    let canonical = log_entry_canonical_bytes(
+        entry.hlc_timestamp.wall_ms,
+        &entry.article_cid,
+        &entry.parent_cids,
+    );
 
     let sig_bytes: [u8; 64] = entry
         .operator_signature
@@ -272,8 +276,11 @@ mod tests {
     }
 
     fn sign_entry(entry: &mut LogEntry, key: &SigningKey) {
-        let canonical =
-            log_entry_canonical_bytes(entry.hlc_timestamp, &entry.article_cid, &entry.parent_cids);
+        let canonical = log_entry_canonical_bytes(
+            entry.hlc_timestamp.wall_ms,
+            &entry.article_cid,
+            &entry.parent_cids,
+        );
         let sig = crate::signing::sign(key, &canonical);
         entry.operator_signature = sig.to_bytes().to_vec();
     }
@@ -326,7 +333,11 @@ mod tests {
         let pubkey = key.verifying_key();
 
         let mut entry = LogEntry {
-            hlc_timestamp: 1_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-valid"),
             operator_signature: vec![],
             parent_cids: vec![],
@@ -336,7 +347,7 @@ mod tests {
         // Compute entry id the same way append.rs does (includes sig bytes).
         let entry_id = {
             let input = entry_id_bytes(
-                entry.hlc_timestamp,
+                entry.hlc_timestamp.wall_ms,
                 &entry.article_cid,
                 &entry.operator_signature,
                 &entry.parent_cids,
@@ -361,7 +372,11 @@ mod tests {
         let pubkey = key.verifying_key();
 
         let mut entry = LogEntry {
-            hlc_timestamp: 2_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 2_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-tampered"),
             operator_signature: vec![],
             parent_cids: vec![],
@@ -392,7 +407,11 @@ mod tests {
         let phantom_cid = entry_id_to_cid(&phantom_id);
 
         let mut entry = LogEntry {
-            hlc_timestamp: 3_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 3_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-orphan"),
             operator_signature: vec![],
             parent_cids: vec![phantom_cid],
@@ -417,7 +436,11 @@ mod tests {
 
         // Store a parent entry with hlc_timestamp = 5_000.
         let mut parent_entry = LogEntry {
-            hlc_timestamp: 5_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 5_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"parent-article"),
             operator_signature: vec![],
             parent_cids: vec![],
@@ -425,7 +448,7 @@ mod tests {
         sign_entry(&mut parent_entry, &key);
         let parent_id = {
             let input = entry_id_bytes(
-                parent_entry.hlc_timestamp,
+                parent_entry.hlc_timestamp.wall_ms,
                 &parent_entry.article_cid,
                 &parent_entry.operator_signature,
                 &parent_entry.parent_cids,
@@ -437,7 +460,11 @@ mod tests {
 
         // Child entry with hlc_timestamp <= parent's (equal — not strictly greater).
         let mut child_entry = LogEntry {
-            hlc_timestamp: 4_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 4_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"child-article"),
             operator_signature: vec![],
             parent_cids: vec![parent_cid],
@@ -463,7 +490,11 @@ mod tests {
         let pubkey = key.verifying_key();
 
         let mut entry = LogEntry {
-            hlc_timestamp: 9_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 9_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-id-mismatch"),
             operator_signature: vec![],
             parent_cids: vec![],
@@ -496,7 +527,11 @@ mod tests {
             .map(|i| test_cid(format!("phantom-parent-{i}").as_bytes()))
             .collect();
         let mut entry = LogEntry {
-            hlc_timestamp: 10_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 10_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-too-many-parents"),
             operator_signature: vec![],
             parent_cids: oversized_parents,
@@ -526,7 +561,11 @@ mod tests {
         let wrong_codec_cid = Cid::new_v1(0x55, digest);
 
         let mut entry = LogEntry {
-            hlc_timestamp: 11_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 11_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: wrong_codec_cid,
             operator_signature: vec![],
             parent_cids: vec![],

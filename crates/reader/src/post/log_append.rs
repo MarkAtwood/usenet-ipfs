@@ -5,6 +5,7 @@ use stoa_core::group_log::append::append as crdt_append;
 use stoa_core::group_log::types::{LogEntry, LogEntryId};
 use stoa_core::group_log::verify::verify_signature;
 use stoa_core::group_log::LogStorage;
+use stoa_core::hlc::HlcTimestamp;
 use stoa_core::signing::SigningKey;
 use stoa_core::InjectionSource;
 
@@ -101,7 +102,11 @@ pub async fn append_to_groups<S: LogStorage>(
             };
 
             let entry = LogEntry {
-                hlc_timestamp: hlc_ts,
+                hlc_timestamp: HlcTimestamp {
+                    wall_ms: hlc_ts,
+                    logical: 0,
+                    node_id: [0u8; 8],
+                },
                 article_cid: *article_cid,
                 operator_signature,
                 parent_cids,

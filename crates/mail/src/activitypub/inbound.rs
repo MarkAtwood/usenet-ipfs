@@ -435,13 +435,11 @@ fn enforce_minimum_signed_headers(signed_headers_spec: &str, method: &str) -> Re
         }
     }
     let method_upper = method.to_uppercase();
-    if method_upper == "POST" || method_upper == "PUT" {
-        if !lower.contains(&"digest") {
-            return Err(
-                "Signature headers= list missing required 'digest' for body-carrying request"
-                    .to_string(),
-            );
-        }
+    if (method_upper == "POST" || method_upper == "PUT") && !lower.contains(&"digest") {
+        return Err(
+            "Signature headers= list missing required 'digest' for body-carrying request"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -473,9 +471,7 @@ fn extract_host(url: &str) -> Option<String> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     // Host ends at the first '/', '?', '#', or end-of-string.
-    let host = without_scheme
-        .split(|c| c == '/' || c == '?' || c == '#')
-        .next()?;
+    let host = without_scheme.split(['/', '?', '#']).next()?;
     if host.is_empty() {
         None
     } else {

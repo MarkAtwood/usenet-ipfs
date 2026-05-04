@@ -24,6 +24,7 @@ use stoa_core::{
         storage::LogStorage,
         types::{LogEntry, LogEntryId},
     },
+    hlc::HlcTimestamp,
     GroupName,
 };
 
@@ -34,7 +35,11 @@ fn make_entry_id(seed: u8) -> LogEntryId {
 
 fn make_entry(hlc: u64) -> LogEntry {
     LogEntry {
-        hlc_timestamp: hlc,
+        hlc_timestamp: HlcTimestamp {
+            wall_ms: hlc,
+            logical: 0,
+            node_id: [0; 8],
+        },
         article_cid: Cid::new_v1(0x71, Code::Sha2_256.digest(&[hlc as u8])),
         operator_signature: vec![],
         parent_cids: vec![],

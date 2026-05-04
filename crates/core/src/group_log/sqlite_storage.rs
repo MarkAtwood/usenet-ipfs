@@ -5,6 +5,7 @@ use crate::article::GroupName;
 use crate::error::StorageError;
 use crate::group_log::storage::LogStorage;
 use crate::group_log::types::{LogEntry, LogEntryId};
+use crate::hlc::HlcTimestamp;
 
 /// Multi-backend `LogStorage` implementation (SQLite or PostgreSQL).
 pub struct SqliteLogStorage {
@@ -33,12 +34,13 @@ impl LogStorage for SqliteLogStorage {
     async fn insert_entry(&self, id: LogEntryId, entry: LogEntry) -> Result<(), StorageError> {
         let id_bytes = id.as_bytes().to_vec();
         let article_cid_bytes = entry.article_cid.to_bytes();
-        // HLC timestamps are u64 wall-ms since UNIX epoch.  Both SQLite and
-        // PostgreSQL store integers as i64.  A timestamp > i64::MAX (year
-        // ~292 million CE) cannot be stored without truncation.
-        let ts = i64::try_from(entry.hlc_timestamp).map_err(|_| {
+        // HLC timestamps are stored as wall_ms (u64) in the DB column (i64).
+        // logical and node_id are not persisted — they are used only for
+        // in-memory CRDT ordering within a single session.  A timestamp
+        // wall_ms > i64::MAX (year ~292 million CE) cannot be stored.
+        let ts = i64::try_from(entry.hlc_timestamp.wall_ms).map_err(|_| {
             StorageError::Database(format!(
-                "HLC timestamp {} exceeds i64::MAX — cannot store",
+                "HLC timestamp {:?} exceeds i64::MAX — cannot store",
                 entry.hlc_timestamp
             ))
         })?;
@@ -129,7 +131,13 @@ impl LogStorage for SqliteLogStorage {
         }
 
         Ok(Some(LogEntry {
-            hlc_timestamp: ts as u64,
+            // Only wall_ms is stored in the DB; logical and node_id are
+            // in-memory ordering fields not written to persistent storage.
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: ts as u64,
+                logical: 0,
+                node_id: [0u8; 8],
+            },
             article_cid,
             operator_signature: sig,
             parent_cids,
@@ -272,9 +280,9 @@ impl LogStorage for SqliteLogStorage {
     ) -> Result<(), StorageError> {
         let id_bytes = id.as_bytes().to_vec();
         let article_cid_bytes = entry.article_cid.to_bytes();
-        let ts = i64::try_from(entry.hlc_timestamp).map_err(|_| {
+        let ts = i64::try_from(entry.hlc_timestamp.wall_ms).map_err(|_| {
             StorageError::Database(format!(
-                "HLC timestamp {} exceeds i64::MAX — cannot store",
+                "HLC timestamp {:?} exceeds i64::MAX — cannot store",
                 entry.hlc_timestamp
             ))
         })?;

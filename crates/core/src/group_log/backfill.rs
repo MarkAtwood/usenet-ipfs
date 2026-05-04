@@ -144,7 +144,7 @@ where
     // silently capturing the wrong entry's parents.
     let mut want_parent_ids: Option<Vec<LogEntryId>> = None;
 
-    queue.push_back(want_id.clone());
+    queue.push_back(want_id);
 
     while let Some(entry_id) = queue.pop_front() {
         let key = *entry_id.as_bytes();
@@ -189,7 +189,7 @@ where
             want_parent_ids = Some(parent_ids_from_entry(&entry));
         }
 
-        match storage.insert_entry(entry_id.clone(), entry.clone()).await {
+        match storage.insert_entry(entry_id, entry.clone()).await {
             Ok(()) => {
                 fetched_count += 1;
             }
@@ -265,6 +265,7 @@ mod tests {
     use crate::group_log::mem_storage::MemLogStorage;
     use crate::group_log::storage::LogStorage;
     use crate::group_log::types::{LogEntry, LogEntryId};
+    use crate::hlc::HlcTimestamp;
 
     fn test_group() -> GroupName {
         GroupName::new("comp.test".to_owned()).unwrap()
@@ -284,7 +285,11 @@ mod tests {
     /// passes for entries built with this helper.
     fn make_entry(hlc: u64, article_seed: &[u8], parents: Vec<Cid>) -> (LogEntryId, LogEntry) {
         let entry = LogEntry {
-            hlc_timestamp: hlc,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: hlc,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: Cid::new_v1(0x71, Code::Sha2_256.digest(article_seed)),
             operator_signature: vec![],
             parent_cids: parents,

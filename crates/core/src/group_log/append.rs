@@ -59,7 +59,7 @@ impl From<AppendError> for StorageError {
 /// they appear in the slice.
 fn compute_entry_id(entry: &LogEntry) -> LogEntryId {
     let input = entry_id_bytes(
-        entry.hlc_timestamp,
+        entry.hlc_timestamp.wall_ms,
         &entry.article_cid,
         &entry.operator_signature,
         &entry.parent_cids,
@@ -132,7 +132,7 @@ pub async fn append<S: LogStorage>(
     // never a tip).  If a concurrent caller won the race, DuplicateEntry is
     // returned — treat as the idempotent success case without re-advancing.
     match storage
-        .insert_entry_and_advance_tips(entry_id.clone(), entry, group, &parent_ids, &entry_id)
+        .insert_entry_and_advance_tips(entry_id, entry, group, &parent_ids, &entry_id)
         .await
     {
         Ok(()) => {}
@@ -149,6 +149,7 @@ mod tests {
     use crate::article::GroupName;
     use crate::group_log::mem_storage::MemLogStorage;
     use crate::group_log::verify::VerifiedEntry;
+    use crate::hlc::HlcTimestamp;
     use cid::Cid;
     use multihash_codetable::{Code, MultihashDigest};
 
@@ -182,7 +183,11 @@ mod tests {
 
         // Genesis entry — no parents.
         let e1 = LogEntry {
-            hlc_timestamp: 1_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-1"),
             operator_signature: vec![0xaa],
             parent_cids: vec![],
@@ -196,7 +201,11 @@ mod tests {
 
         // Second entry: parent is the first entry's ID, expressed as a CID.
         let e2 = LogEntry {
-            hlc_timestamp: 2_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 2_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-2"),
             operator_signature: vec![0xbb],
             parent_cids: vec![entry_id_to_cid(&id1)],
@@ -211,7 +220,11 @@ mod tests {
 
         // Third entry: parent is the second entry's ID.
         let e3 = LogEntry {
-            hlc_timestamp: 3_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 3_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-3"),
             operator_signature: vec![0xcc],
             parent_cids: vec![entry_id_to_cid(&id2)],
@@ -240,7 +253,11 @@ mod tests {
         let group = test_group();
 
         let entry = LogEntry {
-            hlc_timestamp: 42,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 42,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"idempotent-article"),
             operator_signature: vec![0x01, 0x02],
             parent_cids: vec![],
@@ -280,7 +297,11 @@ mod tests {
         let phantom_cid = entry_id_to_cid(&phantom_id);
 
         let entry = LogEntry {
-            hlc_timestamp: 100,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 100,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"orphan-article"),
             operator_signature: vec![],
             parent_cids: vec![phantom_cid.clone()],
@@ -306,7 +327,11 @@ mod tests {
 
         // Genesis entry.
         let genesis = LogEntry {
-            hlc_timestamp: 1_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"genesis"),
             operator_signature: vec![0x00],
             parent_cids: vec![],
@@ -318,13 +343,21 @@ mod tests {
         // Two concurrent appends, both with genesis as parent.
         let genesis_cid = entry_id_to_cid(&genesis_id);
         let ea = LogEntry {
-            hlc_timestamp: 2_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 2_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-a"),
             operator_signature: vec![0xaa],
             parent_cids: vec![genesis_cid.clone()],
         };
         let eb = LogEntry {
-            hlc_timestamp: 2_001,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 2_001,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"article-b"),
             operator_signature: vec![0xbb],
             parent_cids: vec![genesis_cid.clone()],
@@ -367,13 +400,21 @@ mod tests {
         let group = test_group();
 
         let entry_a = LogEntry {
-            hlc_timestamp: 1_000,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"replica-a-article"),
             operator_signature: vec![0xa1],
             parent_cids: vec![],
         };
         let entry_b = LogEntry {
-            hlc_timestamp: 1_001,
+            hlc_timestamp: HlcTimestamp {
+                wall_ms: 1_001,
+                logical: 0,
+                node_id: [0; 8],
+            },
             article_cid: test_cid(b"replica-b-article"),
             operator_signature: vec![0xb1],
             parent_cids: vec![],
