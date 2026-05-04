@@ -137,7 +137,7 @@ impl IpfsStore for RadosStore {
             // Truncate to the actual bytes returned — if the object shrinks
             // between stat and read, rados_object_read returns fewer bytes.
             match ioctx.rados_object_read(&obj_name, &mut buf, 0) {
-                Ok(n) => buf.truncate(n),
+                Ok(n) => buf.truncate(n as usize),
                 Err(ceph::error::RadosError::ApiError(nix::errno::Errno::ENOENT)) => {
                     return Ok(None)
                 }

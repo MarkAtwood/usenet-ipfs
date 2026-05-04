@@ -128,7 +128,7 @@ where
 
 /// Extract Message-ID from raw article bytes.
 /// Looks for `Message-ID:` header in the headers section (before first blank line).
-pub(crate) fn extract_message_id_bytes(raw: &[u8]) -> Option<String> {
+pub fn extract_message_id_bytes(raw: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(raw);
     for line in text.lines() {
         if line.is_empty() {

@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "stoa-transit"
 path = "src/main.rs"
 
+[[bin]]
+name = "stoa-rnews"
+path = "src/rnews_main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -45,6 +49,8 @@ ceph = { version = "3.2.5", optional = true }
 nix = { version = "0.18", optional = true }
 object_store = { version = "0.12", features = ["aws", "azure", "gcp", "http"] }
 bytes = "1.11.1"
+flate2 = "1"
+thiserror = "1"
 opentelemetry = { version = "0.31", features = ["metrics", "trace", "logs"] }
 opentelemetry_sdk = { version = "0.31", features = ["metrics", "trace", "logs"] }
 opentelemetry-otlp = { version = "0.31", features = ["metrics", "trace", "logs", "http-proto", "reqwest-client"] }

@@ -116,7 +116,7 @@ pub async fn check_ingest(
 ///
 /// Non-UTF-8 header lines other than the target field are skipped (not an
 /// error); non-UTF-8 on the `Message-ID` line itself returns `None`.
-fn extract_body_msgid(article_bytes: &[u8]) -> Option<String> {
+pub fn extract_body_msgid(article_bytes: &[u8]) -> Option<String> {
     let mut lines = article_bytes.split(|&b| b == b'\n');
     while let Some(line) = lines.next() {
         let trimmed = line.strip_suffix(b"\r").unwrap_or(line);

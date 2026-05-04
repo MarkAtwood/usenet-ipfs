@@ -14,5 +14,6 @@ pub mod migrations;
 pub mod peering;
 pub mod reload;
 pub mod retention;
+pub mod rnews_config;
 pub mod staging;
 pub mod telemetry;

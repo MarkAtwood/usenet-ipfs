@@ -1,6 +1,7 @@
 pub mod ihave_push;
 pub mod mbox;
 pub mod reindex;
+pub mod rnews;
 pub mod suck_pull;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

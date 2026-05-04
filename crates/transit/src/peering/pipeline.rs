@@ -232,14 +232,19 @@ pub struct StoreBuildResult {
     pub kubo_client: Option<stoa_core::ipfs::KuboHttpClient>,
 }
 
-/// Construct the IPFS block store from configuration.
+/// Construct the IPFS block store from backend and ipfs configuration.
 ///
-/// Prefers `config.backend` when present; falls back to the legacy `config.ipfs`
-/// section for backward compatibility.
+/// Prefers `backend` when `Some`; falls back to the legacy `ipfs_fallback`
+/// URL for backward compatibility.
 ///
-/// Returns `Err` for backends that are not yet implemented.
-pub async fn build_store(config: &crate::config::Config) -> Result<StoreBuildResult, String> {
-    if let Some(backend) = &config.backend {
+/// This is the canonical implementation shared by both `stoa-transit` (via
+/// [`build_store`]) and `stoa-rnews` (via [`crate::rnews_config::build_store_for_rnews`]).
+/// Add new backend arms here; callers get them automatically.
+pub async fn build_store_from_parts(
+    backend: Option<&crate::config::BackendConfig>,
+    ipfs_fallback: &crate::config::IpfsConfig,
+) -> Result<StoreBuildResult, String> {
+    if let Some(backend) = backend {
         use crate::config::BackendType;
         match backend.backend_type {
             BackendType::Kubo => {
@@ -363,22 +368,18 @@ pub async fn build_store(config: &crate::config::Config) -> Result<StoreBuildRes
                     kubo_client: None,
                 })
             }
-            BackendType::PgBlob => Err(
-                "backend.type = 'pg_blob' is not supported in stoa-transit; \
+            BackendType::PgBlob => Err("backend.type = 'pg_blob' is not supported; \
                      use the SQLite or filesystem backend for embedded storage, \
                      or S3 for cloud storage"
-                    .into(),
-            ),
-            BackendType::GitSha256 => Err(
-                "backend.type = 'git_sha256' is not supported in stoa-transit; \
+                .into()),
+            BackendType::GitSha256 => Err("backend.type = 'git_sha256' is not supported; \
                      git object store is a reader-only backend"
-                    .into(),
-            ),
+                .into()),
             BackendType::Rados => {
                 #[cfg(not(feature = "rados"))]
                 return Err(
                     "backend.type = 'rados' requires the 'rados' Cargo feature; \
-                     rebuild stoa-transit with --features rados (requires librados-dev)"
+                     rebuild with --features rados (requires librados-dev)"
                         .into(),
                 );
                 #[cfg(feature = "rados")]
@@ -398,13 +399,21 @@ pub async fn build_store(config: &crate::config::Config) -> Result<StoreBuildRes
         }
     } else {
         // Backward-compat: use legacy [ipfs] section.
-        let store = KuboStore::new(&config.ipfs.api_url);
+        let store = KuboStore::new(&ipfs_fallback.api_url);
         let client = store.kubo_client();
         Ok(StoreBuildResult {
             store: Arc::new(store),
             kubo_client: Some(client),
         })
     }
+}
+
+/// Construct the IPFS block store from a full [`crate::config::Config`].
+///
+/// Thin wrapper around [`build_store_from_parts`].  Prefers `config.backend`
+/// when present; falls back to the legacy `config.ipfs` section.
+pub async fn build_store(config: &crate::config::Config) -> Result<StoreBuildResult, String> {
+    build_store_from_parts(config.backend.as_ref(), &config.ipfs).await
 }
 
 // ── Pipeline context and result types ────────────────────────────────────────
@@ -647,7 +656,7 @@ where
         let canonical = log_entry_canonical_bytes(ctx.timestamp.wall_ms, &cid, &parent_cids);
         let sig = sign(&ctx.operator_signing_key, &canonical);
         let entry = LogEntry {
-            hlc_timestamp: ctx.timestamp.wall_ms,
+            hlc_timestamp: ctx.timestamp,
             article_cid: cid,
             operator_signature: sig.to_bytes().to_vec(),
             parent_cids,
@@ -823,7 +832,14 @@ fn parse_message_id_and_newsgroups(article_bytes: &[u8]) -> Option<(String, Vec<
             continue;
         }
 
-        // Not a continuation line — reset current header tracking.
+        // Not a continuation line — check early-exit before resetting.
+        // Only break when both fields are fully accumulated (current == 0 means
+        // the previous header needed no further continuation lines, or we just
+        // finished one). This prevents breaking after seeing `Message-ID:\r\n`
+        // (empty value on the name line) before the folded continuation is read.
+        if current == 0 && message_id.is_some() && newsgroups_val.is_some() {
+            break;
+        }
         current = 0;
 
         let s = match std::str::from_utf8(trimmed) {
@@ -842,9 +858,6 @@ fn parse_message_id_and_newsgroups(article_bytes: &[u8]) -> Option<(String, Vec<
         {
             newsgroups_val = Some(s[NG.len()..].trim().to_owned());
             current = 2;
-        }
-        if message_id.is_some() && newsgroups_val.is_some() {
-            break;
         }
     }
 
