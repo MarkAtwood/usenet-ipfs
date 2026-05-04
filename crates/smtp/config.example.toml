@@ -1,0 +1,52 @@
+# stoa-smtp example configuration
+# Copy to smtp.toml and edit before running stoa-smtp.
+
+[listen]
+# Inbound MTA-to-MTA (unauthenticated, no TLS in v1)
+port_25  = "0.0.0.0:25"
+# Mail submission (AUTH PLAIN; TLS optional in demo mode)
+port_587 = "0.0.0.0:587"
+# Implicit-TLS submission (SMTPS). Requires [tls] to be set.
+# smtps_addr = "0.0.0.0:465"
+
+# Fully-qualified hostname announced in EHLO and used in Received: headers.
+hostname = "mail.example.com"
+
+[auth]
+required = true
+
+[[auth.users]]
+username = "alice"
+# bcrypt hash of the password. Generate with:
+#   htpasswd -bnBC 12 "" "yourpassword" | tr -d ":\n" | sed "s/\$2y/\$2b/"
+password_hash = "$2b$12$examplehashexamplehashexamplehashexamplehashexamplehashe"
+
+[tls]
+# Required for SMTPS (port 465). Leave empty if using port 587 without TLS.
+# cert_path = "/etc/ssl/certs/mail.crt"
+# key_path  = "/etc/ssl/private/mail.key"
+
+[database]
+# SQLite database for Sieve scripts.
+path = "/var/lib/stoa/smtp/smtp.db"
+
+[delivery]
+# Directory for the outbound SMTP relay spool.
+queue_dir = "/var/lib/stoa/smtp/queue"
+
+# Address of the stoa-reader NNTP daemon for article delivery.
+# Inbound messages are forwarded here after Sieve filtering.
+[reader]
+nntp_addr = "127.0.0.1:119"
+
+# Optional: relay outbound mail through a smarthost.
+# [[delivery.smtp_relay_peers]]
+# host = "smtp.example.com"
+# port = 587
+# tls  = true
+# username = "relay-user"
+# password = "relay-password"
+
+[log]
+level = "info"
+format = "json"   # or "text" for human-readable output

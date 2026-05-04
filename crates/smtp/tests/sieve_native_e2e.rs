@@ -152,6 +152,7 @@ async fn drive(
         run_session(
             stream,
             false,
+            false,
             peer.to_string(),
             config2,
             cred_store,

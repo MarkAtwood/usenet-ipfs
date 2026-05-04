@@ -160,9 +160,13 @@ enum SessionState {
 /// special folder.  Callers populate this once at startup (from the mail DB)
 /// so `sieve_delivery` never issues a per-message `SELECT … WHERE role='inbox'`
 /// query.  `None` means JMAP delivery is not configured.
+/// `is_submission`: `true` when the connection arrived on the submission port
+/// (587).  AUTH PLAIN is advertised on submission sessions even without TLS so
+/// that mail clients can authenticate for demo/dev deployments without TLS.
 pub async fn run_session<S>(
     stream: S,
     is_tls: bool,
+    is_submission: bool,
     peer_addr: String,
     config: Arc<Config>,
     credential_store: Arc<CredentialStore>,
@@ -278,10 +282,11 @@ pub async fn run_session<S>(
                 // that sees STARTTLS in EHLO will send the STARTTLS command,
                 // receive 454, and abort delivery.
                 //
-                // AUTH PLAIN is advertised only on SMTPS (is_tls=true) to
-                // prevent credentials from being sent over a cleartext
-                // connection.
-                let auth_line = if is_tls && !credential_store.is_empty() {
+                // AUTH PLAIN is advertised on SMTPS (is_tls=true) and on the
+                // submission port (is_submission=true) so mail clients can
+                // authenticate on port 587 even without TLS in demo deployments.
+                // Port 25 (MTA-to-MTA) never advertises AUTH.
+                let auth_line = if (is_tls || is_submission) && !credential_store.is_empty() {
                     "250-AUTH PLAIN\r\n"
                 } else {
                     ""
@@ -1434,6 +1439,7 @@ mod tests {
             run_session(
                 stream,
                 false,
+                false,
                 peer.to_string(),
                 config2,
                 credential_store,
@@ -1614,6 +1620,7 @@ mod tests {
             let (stream, peer) = listener.accept().await.unwrap();
             run_session(
                 stream,
+                false,
                 false,
                 peer.to_string(),
                 config2,
@@ -2224,6 +2231,7 @@ mod tests {
             run_session(
                 stream,
                 false,
+                false,
                 peer.to_string(),
                 config2,
                 credential_store,
@@ -2512,6 +2520,7 @@ mod tests {
             run_session(
                 stream,
                 true,
+                false,
                 peer.to_string(),
                 config2,
                 store2,
@@ -2567,6 +2576,7 @@ mod tests {
                 run_session(
                     stream,
                     true,
+                    false,
                     peer.to_string(),
                     config2,
                     Arc::new(CredentialStore::empty()),
@@ -2615,6 +2625,7 @@ mod tests {
                 run_session(
                     stream,
                     false,
+                    false,
                     peer.to_string(),
                     config2,
                     Arc::new(CredentialStore::empty()),
@@ -2662,6 +2673,7 @@ mod tests {
                 let (stream, peer) = listener.accept().await.expect("accept");
                 run_session(
                     stream,
+                    false,
                     false,
                     peer.to_string(),
                     config2,

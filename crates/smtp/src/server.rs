@@ -122,8 +122,10 @@ pub async fn run_server(
         // Unified accepted-connection enum so both branches of the select!
         // produce the same type.  TLS handshake happens inline in the SMTPS
         // branch so that handshake failures never reach the session.
+        // `is_submission` is true for port-587 connections so that AUTH PLAIN
+        // is advertised to mail clients even on plaintext sessions.
         enum Accepted {
-            Plain(tokio::net::TcpStream, std::net::SocketAddr),
+            Plain(tokio::net::TcpStream, std::net::SocketAddr, bool),
             Tls(
                 Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
                 std::net::SocketAddr,
@@ -133,7 +135,7 @@ pub async fn run_server(
         let accepted = if let Some((ref smtps_listener, ref tls_acceptor)) = listener_smtps {
             tokio::select! {
                 result = listener_25.accept() => match result {
-                    Ok((s, a)) => Accepted::Plain(s, a),
+                    Ok((s, a)) => Accepted::Plain(s, a, false),
                     Err(e) => {
                         error!("port_25 accept error: {e}");
                         drop(permit);
@@ -141,7 +143,7 @@ pub async fn run_server(
                     }
                 },
                 result = listener_587.accept() => match result {
-                    Ok((s, a)) => Accepted::Plain(s, a),
+                    Ok((s, a)) => Accepted::Plain(s, a, true),
                     Err(e) => {
                         error!("port_587 accept error: {e}");
                         drop(permit);
@@ -169,7 +171,7 @@ pub async fn run_server(
         } else {
             tokio::select! {
                 result = listener_25.accept() => match result {
-                    Ok((s, a)) => Accepted::Plain(s, a),
+                    Ok((s, a)) => Accepted::Plain(s, a, false),
                     Err(e) => {
                         error!("port_25 accept error: {e}");
                         drop(permit);
@@ -177,7 +179,7 @@ pub async fn run_server(
                     }
                 },
                 result = listener_587.accept() => match result {
-                    Ok((s, a)) => Accepted::Plain(s, a),
+                    Ok((s, a)) => Accepted::Plain(s, a, true),
                     Err(e) => {
                         error!("port_587 accept error: {e}");
                         drop(permit);
@@ -198,14 +200,15 @@ pub async fn run_server(
         let inbox_id = inbox_mailbox_id.clone();
 
         match accepted {
-            Accepted::Plain(stream, peer_addr) => {
+            Accepted::Plain(stream, peer_addr, is_submission) => {
                 let peer_str = peer_addr.to_string();
-                info!(%peer_str, "accepted plaintext connection");
+                info!(%peer_str, is_submission, "accepted plaintext connection");
                 tokio::spawn(async move {
                     let _permit = permit;
                     run_session(
                         stream,
                         false,
+                        is_submission,
                         peer_str,
                         config,
                         cred_store,
@@ -228,6 +231,7 @@ pub async fn run_server(
                     run_session(
                         *tls_stream,
                         true,
+                        false, // SMTPS is always TLS, is_submission flag not needed
                         peer_str,
                         config,
                         cred_store,

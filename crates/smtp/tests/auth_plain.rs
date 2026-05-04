@@ -145,6 +145,7 @@ async fn drive(client_script: &[u8], is_tls: bool, config: Arc<Config>) -> Strin
         run_session(
             stream,
             is_tls,
+            false,
             peer.to_string(),
             config2,
             cred_store,
