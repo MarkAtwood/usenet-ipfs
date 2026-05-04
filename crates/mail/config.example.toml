@@ -17,14 +17,21 @@ enabled = true
 allowed_origins = ["*"]
 
 [database]
-path = "/var/lib/stoa/mail/mail.db"
+# SQLite database URL. stoa-mail runs all migrations automatically at startup.
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+# Path to the SQLite block store for content-addressed article storage.
+# MUST match [backend.sqlite] path in stoa-reader's config so both processes
+# share the same blocks.
+block_store_path = "/var/lib/stoa/mail/blocks.db"
 
 [auth]
 required = true
 
 [[auth.users]]
 username = "alice"
-# bcrypt hash of the password. Generate with: htpasswd -bnBC 12 "" "password" | tr -d ":\n" | sed "s/\$2y/\$2b/"
+# bcrypt hash of the password. Generate with:
+#   htpasswd -bnBC 12 "" "yourpassword" | tr -d ":\n" | sed "s/\$2y/\$2b/"
 password_hash = "$2b$12$examplehashexamplehashexamplehashexamplehashexamplehashe"
 
 [tls]

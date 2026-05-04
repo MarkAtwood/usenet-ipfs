@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use stoa_mail::{
     config::{Config, LogFormat},
-    server::AppState,
+    server::{build_jmap_dispatcher, AppState, JmapStores},
     token_store::TokenStore,
 };
 use tracing::{info, warn};
@@ -120,8 +120,18 @@ async fn main() {
         );
     }
 
+    // Run all three sets of migrations against the single mail database so that
+    // all stores (mail, reader, core) can share one SQLite file.
     if let Err(e) = stoa_mail::migrations::run_migrations(&config.database.url).await {
-        eprintln!("error: database migration failed: {}", e);
+        eprintln!("error: mail database migration failed: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = stoa_reader::migrations::run_migrations(&config.database.url).await {
+        eprintln!("error: reader database migration failed: {}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = stoa_core::migrations::run_migrations(&config.database.url).await {
+        eprintln!("error: core database migration failed: {}", e);
         std::process::exit(1);
     }
 
@@ -136,7 +146,81 @@ async fn main() {
         }
     };
 
-    let token_store = Arc::new(TokenStore::new(pool));
+    // Open the SQLite block store (shared with stoa-reader via the same path).
+    let ipfs: Arc<dyn stoa_reader::post::ipfs_write::IpfsBlockStore> = {
+        let path = std::path::Path::new(&config.database.block_store_path);
+        match stoa_reader::post::sqlite_store::SqliteBlockStore::open(path).await {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                eprintln!("error: failed to open block store: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // Provision the six RFC 6154 special-use mailboxes (idempotent INSERT OR IGNORE).
+    if let Err(e) = stoa_mail::mailbox::provision::provision_mailboxes(&pool).await {
+        eprintln!("error: mailbox provisioning failed: {e}");
+        std::process::exit(1);
+    }
+    let special_mailboxes = match stoa_mail::mailbox::provision::list_mailboxes(&pool).await {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            eprintln!("error: failed to list mailboxes: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Build the outbound SMTP relay queue if relay peers are configured.
+    let smtp_relay_queue = if config.delivery.smtp_relay_peers.is_empty() {
+        None
+    } else {
+        let queue_dir = std::path::PathBuf::from(&config.delivery.smtp_relay_queue_dir);
+        let down_backoff = std::time::Duration::from_secs(config.delivery.smtp_peer_down_secs);
+        match stoa_smtp::SmtpRelayQueue::new(
+            queue_dir,
+            config.delivery.smtp_relay_peers.clone(),
+            down_backoff,
+            None, // no DKIM signer from JMAP server
+            "localhost",
+            None, // no MTA-STS enforcer from JMAP server
+        ) {
+            Ok(q) => Some(q),
+            Err(e) => {
+                eprintln!("error: failed to build SMTP relay queue: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let stores = Arc::new(JmapStores {
+        ipfs,
+        msgid_map: Arc::new(stoa_core::msgid_map::MsgIdMap::new((*pool).clone())),
+        article_numbers: Arc::new(
+            stoa_reader::store::article_numbers::ArticleNumberStore::new((*pool).clone()),
+        ),
+        overview_store: Arc::new(stoa_reader::store::overview::OverviewStore::new(
+            (*pool).clone(),
+        )),
+        user_flags: Arc::new(stoa_mail::state::flags::UserFlagsStore::new(
+            (*pool).clone(),
+        )),
+        state_store: Arc::new(stoa_mail::state::version::StateStore::new((*pool).clone())),
+        change_log: Arc::new(stoa_mail::state::change_log::ChangeLogStore::new(
+            (*pool).clone(),
+        )),
+        subscription_store: Arc::new(stoa_mail::state::subscriptions::SubscriptionStore::new(
+            (*pool).clone(),
+        )),
+        search_index: None,
+        smtp_relay_queue,
+        mail_pool: Arc::clone(&pool),
+        special_mailboxes,
+    });
+
+    let jmap_dispatcher = Arc::new(build_jmap_dispatcher(Arc::clone(&stores)));
+
+    let token_store = Arc::new(TokenStore::new(Arc::clone(&pool)));
 
     let oidc_store = if config.auth.oidc_providers.is_empty() {
         None
@@ -148,8 +232,8 @@ async fn main() {
 
     let state = Arc::new(AppState {
         start_time,
-        jmap: None,
-        jmap_dispatcher: None,
+        jmap: Some(stores),
+        jmap_dispatcher: Some(jmap_dispatcher),
         credential_store: Arc::new(credential_store),
         auth_config: Arc::new(config.auth),
         token_store,

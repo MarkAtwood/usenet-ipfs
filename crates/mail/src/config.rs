@@ -50,16 +50,26 @@ fn default_database_url() -> String {
     "sqlite:///var/lib/stoa/mail/mail.db".to_string()
 }
 
+fn default_block_store_path() -> String {
+    "/var/lib/stoa/mail/blocks.db".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(default = "default_database_url")]
     pub url: String,
+    /// Path to the SQLite block store for IPFS-style content-addressed storage.
+    /// Must match the `[backend.sqlite] path` used by `stoa-reader` so both
+    /// processes share the same block store.
+    #[serde(default = "default_block_store_path")]
+    pub block_store_path: String,
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: default_database_url(),
+            block_store_path: default_block_store_path(),
         }
     }
 }

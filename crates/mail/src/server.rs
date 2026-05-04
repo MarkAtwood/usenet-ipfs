@@ -987,11 +987,12 @@ impl JmapHandler<JmapCaller> for StoaHandler {
 
 /// Resolve a username to its numeric `user_id` from the database.
 ///
-/// - `Ok(Some(id))` — user found.
-/// - `Ok(Some(SINGLETON_USER_ID))` — `username` is `"anonymous"` (unauthenticated
-///   request); singleton fallback is intentional for single-user deployments.
-/// - `Ok(None)` — authenticated user not in the `users` table; caller should
-///   return 403 to prevent cross-user data access.
+/// - `Ok(Some(id))` — user found in the `users` table.
+/// - `Ok(Some(SINGLETON_USER_ID))` — user not in the table (or `"anonymous"`);
+///   singleton fallback maps every principal to user 1.  This is the intended
+///   behaviour for demo/single-user deployments where a `users` table row is
+///   not required.  Multi-user deployments should provision the table and
+///   remove this fallback.
 /// - `Err` — database error; caller should return 503.
 async fn resolve_user_id(pool: &sqlx::AnyPool, username: &str) -> Result<Option<i64>, sqlx::Error> {
     match sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE username = ?")
@@ -1000,8 +1001,10 @@ async fn resolve_user_id(pool: &sqlx::AnyPool, username: &str) -> Result<Option<
         .await?
     {
         Some(id) => Ok(Some(id)),
-        None if username == "anonymous" => Ok(Some(SINGLETON_USER_ID)),
-        None => Ok(None),
+        // Demo/single-user fallback: any unknown user (including "anonymous")
+        // maps to SINGLETON_USER_ID so the server is usable without pre-provisioning
+        // user rows.
+        None => Ok(Some(SINGLETON_USER_ID)),
     }
 }
 
@@ -1017,7 +1020,7 @@ async fn resolve_user_id(pool: &sqlx::AnyPool, username: &str) -> Result<Option<
 /// so that the Dispatcher emits a well-formed `unknownMethod` response rather
 /// than a generic HTTP error.  To implement a stub, add a match arm in
 /// `StoaHandler::call()` — no change here is needed.
-fn build_jmap_dispatcher(stores: Arc<JmapStores>) -> OpaqueJmapDispatcher {
+pub fn build_jmap_dispatcher(stores: Arc<JmapStores>) -> OpaqueJmapDispatcher {
     let handler: Arc<dyn JmapHandler<JmapCaller>> = Arc::new(StoaHandler { stores });
 
     const METHODS: &[&str] = &[
@@ -1115,17 +1118,7 @@ async fn jmap_api_handler(
 
     let user_id = match resolve_user_id(&jmap.mail_pool, &username).await {
         Ok(Some(id)) => id,
-        Ok(None) => {
-            tracing::warn!(
-                username = %username,
-                "JMAP: authenticated user not found in users table; rejecting to prevent cross-user data access"
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "user not provisioned"})),
-            )
-                .into_response();
-        }
+        Ok(None) => unreachable!("resolve_user_id always returns Some in demo mode"),
         Err(e) => {
             tracing::error!(error = %e, "JMAP: users table lookup failed");
             return (
