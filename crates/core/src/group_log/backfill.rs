@@ -162,9 +162,7 @@ where
 
         visited.insert(key);
 
-        let verified = fetch(entry_id)
-            .await
-            .map_err(BackfillError::FetchFailed)?;
+        let verified = fetch(entry_id).await.map_err(BackfillError::FetchFailed)?;
         let entry = verified.into_inner();
 
         // Verify the returned entry's computed ID matches the requested ID.

@@ -614,7 +614,12 @@ mod tests {
         .expect("new");
 
         queue
-            .enqueue(b"article bytes", "from@example.com", &["to@example.com"], false)
+            .enqueue(
+                b"article bytes",
+                "from@example.com",
+                &["to@example.com"],
+                false,
+            )
             .await
             .expect("enqueue");
 
@@ -713,7 +718,10 @@ mod tests {
             parsed.rcpt_to,
             vec!["rcpt1@example.com", "rcpt2@example.com"]
         );
-        assert!(!parsed.require_tls, "require_tls should be false when not set");
+        assert!(
+            !parsed.require_tls,
+            "require_tls should be false when not set"
+        );
     }
 
     // Oracle: RFC 8689 — require_tls=true must survive the queue round-trip so
@@ -744,7 +752,10 @@ mod tests {
 
         let contents = std::fs::read(env_file.path()).expect("read env file");
         let parsed: EnvelopeFile = serde_json::from_slice(&contents).expect("parse JSON");
-        assert!(parsed.require_tls, "require_tls=true must be persisted in the envelope file");
+        assert!(
+            parsed.require_tls,
+            "require_tls=true must be persisted in the envelope file"
+        );
     }
 
     // Oracle: envelope files written before the require_tls field was added
@@ -753,7 +764,10 @@ mod tests {
     async fn enqueue_envelope_without_require_tls_deserializes_as_false() {
         let json = r#"{"mail_from":"from@example.com","rcpt_to":["to@example.com"]}"#;
         let parsed: EnvelopeFile = serde_json::from_str(json).expect("legacy envelope must parse");
-        assert!(!parsed.require_tls, "missing require_tls field should default to false");
+        assert!(
+            !parsed.require_tls,
+            "missing require_tls field should default to false"
+        );
     }
 
     #[tokio::test]
@@ -770,11 +784,21 @@ mod tests {
         .expect("new");
 
         queue
-            .enqueue(b"article one", "from@example.com", &["to@example.com"], false)
+            .enqueue(
+                b"article one",
+                "from@example.com",
+                &["to@example.com"],
+                false,
+            )
             .await
             .expect("enqueue 1");
         queue
-            .enqueue(b"article two", "from@example.com", &["to@example.com"], false)
+            .enqueue(
+                b"article two",
+                "from@example.com",
+                &["to@example.com"],
+                false,
+            )
             .await
             .expect("enqueue 2");
 

@@ -89,7 +89,10 @@ pub async fn maybe_enqueue_smtp_relay(
     let mail_from = extract_mail_from(article_bytes);
     let rcpts: Vec<&str> = recipients.iter().map(String::as_str).collect();
 
-    if let Err(e) = queue.enqueue(article_bytes, &mail_from, &rcpts, false).await {
+    if let Err(e) = queue
+        .enqueue(article_bytes, &mail_from, &rcpts, false)
+        .await
+    {
         tracing::warn!("smtp relay enqueue failed: {e}");
         stoa_smtp::metrics::inc_relay_enqueue_failure();
     }

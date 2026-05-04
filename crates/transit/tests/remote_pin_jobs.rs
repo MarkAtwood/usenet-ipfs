@@ -231,4 +231,3 @@ async fn admin_pinning_remote_endpoint_returns_stats() {
     assert_eq!(web3["pending"], 0);
     assert_eq!(web3["pinned"], 0);
 }
-

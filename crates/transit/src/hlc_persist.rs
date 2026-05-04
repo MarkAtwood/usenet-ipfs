@@ -74,7 +74,10 @@ mod tests {
 
         let loaded = load_hlc_checkpoint(&pool).await.unwrap().unwrap();
         assert_eq!(loaded.wall_ms, 2000);
-        assert_eq!(loaded.node_id, [0xBB; 8], "second save must overwrite first");
+        assert_eq!(
+            loaded.node_id, [0xBB; 8],
+            "second save must overwrite first"
+        );
     }
 }
 

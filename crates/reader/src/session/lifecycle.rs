@@ -643,7 +643,11 @@ where
                     }
                     Ok(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
                         warn!(peer = %peer_addr, "IHAVE rejected: article too large");
-                        if writer.write_all(b"437 Article too large\r\n").await.is_err() {
+                        if writer
+                            .write_all(b"437 Article too large\r\n")
+                            .await
+                            .is_err()
+                        {
                             return CommandLoopExit::Done;
                         }
                     }

@@ -1142,7 +1142,10 @@ mod tests {
         let app = mta_sts_app(vec![crate::config::MtaStsDomainConfig {
             domain: "example.com".to_string(),
             mode: MtaStsMode::Enforce,
-            mx_patterns: vec!["mail.example.com".to_string(), "*.mx.example.com".to_string()],
+            mx_patterns: vec![
+                "mail.example.com".to_string(),
+                "*.mx.example.com".to_string(),
+            ],
             max_age_secs: 86400,
         }])
         .await;
@@ -1183,7 +1186,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_body(resp).await;
         assert!(body.contains("mode: none\r\n"), "body: {body}");
-        assert!(!body.contains("mx:"), "mode=none must not include mx lines: {body}");
+        assert!(
+            !body.contains("mx:"),
+            "mode=none must not include mx lines: {body}"
+        );
     }
 
     // T3: domain not in hosted_domains → 404.

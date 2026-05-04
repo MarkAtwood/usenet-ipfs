@@ -597,7 +597,9 @@ where
                     );
                 }
             }
-            return Err(PipelineError::Transient(format!("msgid insert failed: {e}")));
+            return Err(PipelineError::Transient(format!(
+                "msgid insert failed: {e}"
+            )));
         }
     }
 
@@ -723,7 +725,11 @@ where
         .bind(byte_count)
         .execute(pool)
         .await
-        .map_err(|e| PipelineError::Transient(format!("articles table insert failed for CID {cid_str}: {e}")))?;
+        .map_err(|e| {
+            PipelineError::Transient(format!(
+                "articles table insert failed for CID {cid_str}: {e}"
+            ))
+        })?;
     }
 
     let group_names: Vec<String> = appended_groups.into_iter().map(|(name, _)| name).collect();

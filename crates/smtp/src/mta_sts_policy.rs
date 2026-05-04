@@ -17,7 +17,9 @@ pub fn parse_mta_sts_policy(
     max_body_bytes: usize,
 ) -> Result<MtaStsPolicy, MtaStsError> {
     if body.len() > max_body_bytes {
-        return Err(MtaStsError::PolicyParseFailed { message: "policy body too large".into() });
+        return Err(MtaStsError::PolicyParseFailed {
+            message: "policy body too large".into(),
+        });
     }
 
     // Split on both CRLF and bare LF; filter out blank / whitespace-only lines.
@@ -28,12 +30,16 @@ pub fn parse_mta_sts_policy(
         .collect();
 
     if lines.is_empty() {
-        return Err(MtaStsError::PolicyParseFailed { message: "first line must be 'version: STSv1'".into() });
+        return Err(MtaStsError::PolicyParseFailed {
+            message: "first line must be 'version: STSv1'".into(),
+        });
     }
 
     // RFC 8461 §3.2: first non-empty line MUST be "version: STSv1" (case-sensitive).
     if lines[0] != "version: STSv1" {
-        return Err(MtaStsError::PolicyParseFailed { message: "first line must be 'version: STSv1'".into() });
+        return Err(MtaStsError::PolicyParseFailed {
+            message: "first line must be 'version: STSv1'".into(),
+        });
     }
 
     let mut mode: Option<MtaStsMode> = None;
@@ -54,17 +60,18 @@ pub fn parse_mta_sts_policy(
         match key {
             "mode" => {
                 if mode.is_some() {
-                    return Err(MtaStsError::PolicyParseFailed { message: "duplicate 'mode' field".into() });
+                    return Err(MtaStsError::PolicyParseFailed {
+                        message: "duplicate 'mode' field".into(),
+                    });
                 }
                 let parsed = match value {
                     "none" => MtaStsMode::None,
                     "testing" => MtaStsMode::Testing,
                     "enforce" => MtaStsMode::Enforce,
                     other => {
-                        return Err(MtaStsError::PolicyParseFailed { message: format!(
-                            "unknown mode value: {}",
-                            other
-                        ) });
+                        return Err(MtaStsError::PolicyParseFailed {
+                            message: format!("unknown mode value: {}", other),
+                        });
                     }
                 };
                 mode = Some(parsed);
@@ -76,23 +83,26 @@ pub fn parse_mta_sts_policy(
                 // hostname ending in a dot — reject it as malformed.
                 if let Some(suffix) = pattern.strip_prefix("*.") {
                     if suffix.is_empty() {
-                        return Err(MtaStsError::PolicyParseFailed { message: "invalid mx pattern: '*.' requires a non-empty suffix".into() });
+                        return Err(MtaStsError::PolicyParseFailed {
+                            message: "invalid mx pattern: '*.' requires a non-empty suffix".into(),
+                        });
                     }
                 }
                 mx_patterns.push(pattern);
             }
             "max_age" => {
                 if max_age.is_some() {
-                    return Err(MtaStsError::PolicyParseFailed { message: "duplicate 'max_age' field".into() });
+                    return Err(MtaStsError::PolicyParseFailed {
+                        message: "duplicate 'max_age' field".into(),
+                    });
                 }
-                let parsed: u32 = value.parse().map_err(|_| {
-                    MtaStsError::PolicyParseFailed { message: format!("max_age is not a valid u32: {}", value) }
+                let parsed: u32 = value.parse().map_err(|_| MtaStsError::PolicyParseFailed {
+                    message: format!("max_age is not a valid u32: {}", value),
                 })?;
                 if parsed > 31_557_600 {
-                    return Err(MtaStsError::PolicyParseFailed { message: format!(
-                        "max_age {} exceeds maximum 31557600",
-                        parsed
-                    ) });
+                    return Err(MtaStsError::PolicyParseFailed {
+                        message: format!("max_age {} exceeds maximum 31557600", parsed),
+                    });
                 }
                 max_age = Some(parsed);
             }
@@ -102,14 +112,19 @@ pub fn parse_mta_sts_policy(
         }
     }
 
-    let mode = mode.ok_or_else(|| MtaStsError::PolicyParseFailed { message: "missing 'mode' field".into() })?;
+    let mode = mode.ok_or_else(|| MtaStsError::PolicyParseFailed {
+        message: "missing 'mode' field".into(),
+    })?;
     // RFC 8461 §3.2: mx is required only for "enforce" and "testing" modes.
     // For "none", the mx list is irrelevant and may be omitted.
     if matches!(mode, MtaStsMode::Enforce | MtaStsMode::Testing) && mx_patterns.is_empty() {
-        return Err(MtaStsError::PolicyParseFailed { message: "at least one 'mx' field is required for enforce/testing mode".into() });
+        return Err(MtaStsError::PolicyParseFailed {
+            message: "at least one 'mx' field is required for enforce/testing mode".into(),
+        });
     }
-    let max_age =
-        max_age.ok_or_else(|| MtaStsError::PolicyParseFailed { message: "missing 'max_age' field".into() })?;
+    let max_age = max_age.ok_or_else(|| MtaStsError::PolicyParseFailed {
+        message: "missing 'max_age' field".into(),
+    })?;
 
     Ok(MtaStsPolicy {
         mode,

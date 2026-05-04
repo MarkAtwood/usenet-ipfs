@@ -43,7 +43,9 @@ pub async fn fetch_mta_sts_policy_body(
         || domain.contains('[')
         || domain.contains(']')
     {
-        return Err(MtaStsError::PolicyFetchFailed { message: "invalid domain".into() });
+        return Err(MtaStsError::PolicyFetchFailed {
+            message: "invalid domain".into(),
+        });
     }
 
     let url = format!(
@@ -68,7 +70,9 @@ async fn fetch_url(
         .timeout(Duration::from_millis(timeout_ms))
         .send()
         .await
-        .map_err(|e| MtaStsError::PolicyFetchFailed { message: format!("request failed: {e}") })?;
+        .map_err(|e| MtaStsError::PolicyFetchFailed {
+            message: format!("request failed: {e}"),
+        })?;
 
     let status = response.status();
     if status.is_redirection() {
@@ -88,7 +92,9 @@ async fn fetch_url(
         let chunk = response
             .chunk()
             .await
-            .map_err(|e| MtaStsError::PolicyFetchFailed { message: format!("body read failed: {e}") })?;
+            .map_err(|e| MtaStsError::PolicyFetchFailed {
+                message: format!("body read failed: {e}"),
+            })?;
         match chunk {
             None => break,
             Some(bytes) => {
@@ -100,8 +106,9 @@ async fn fetch_url(
         }
     }
 
-    let body = String::from_utf8(buf)
-        .map_err(|_| MtaStsError::PolicyFetchFailed { message: "invalid UTF-8 in response".into() })?;
+    let body = String::from_utf8(buf).map_err(|_| MtaStsError::PolicyFetchFailed {
+        message: "invalid UTF-8 in response".into(),
+    })?;
 
     Ok(body)
 }

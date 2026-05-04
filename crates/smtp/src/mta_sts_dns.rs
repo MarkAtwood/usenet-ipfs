@@ -28,7 +28,9 @@ pub async fn lookup_mta_sts_txt(
             if matches!(e.kind(), ProtoErrorKind::NoRecordsFound { .. }) {
                 return Ok(None);
             }
-            return Err(MtaStsError::DnsLookupFailed { message: format!("{e}") });
+            return Err(MtaStsError::DnsLookupFailed {
+                message: format!("{e}"),
+            });
         }
     };
 

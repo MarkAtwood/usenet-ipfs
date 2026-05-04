@@ -87,14 +87,16 @@ pub struct MtaStsEnforcer {
 impl MtaStsEnforcer {
     pub fn new(fetch_timeout_ms: u64, max_body_bytes: usize) -> Result<Self, crate::MtaStsError> {
         let resolver = TokioResolver::builder_tokio()
-            .map_err(|e| crate::MtaStsError::DnsLookupFailed { message: format!("resolver init failed: {e}") })?
+            .map_err(|e| crate::MtaStsError::DnsLookupFailed {
+                message: format!("resolver init failed: {e}"),
+            })?
             .build();
         // reqwest::Client holds a connection pool; build once and reuse.
         let http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| {
-                crate::MtaStsError::PolicyFetchFailed { message: format!("HTTP client init failed: {e}") }
+            .map_err(|e| crate::MtaStsError::PolicyFetchFailed {
+                message: format!("HTTP client init failed: {e}"),
             })?;
         Ok(Self {
             resolver,
@@ -132,16 +134,14 @@ impl MtaStsEnforcer {
             // processes delivering to many distinct domains).
             let now = Instant::now();
             guard.retain(|_, entry| now < entry.valid_until);
-            guard
-                .get(rcpt_domain)
-                .map(|entry| {
-                    (
-                        entry.policy_id.clone(),
-                        entry.mode, // MtaStsMode is Copy
-                        entry.mx_patterns.clone(),
-                        entry.last_id_check,
-                    )
-                })
+            guard.get(rcpt_domain).map(|entry| {
+                (
+                    entry.policy_id.clone(),
+                    entry.mode, // MtaStsMode is Copy
+                    entry.mx_patterns.clone(),
+                    entry.last_id_check,
+                )
+            })
         };
 
         let (mode, mx_patterns) = match cached {

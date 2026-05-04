@@ -104,8 +104,20 @@ fn is_valid_header_name(name: &str) -> bool {
             c.is_ascii_alphanumeric()
                 || matches!(
                     c,
-                    '-' | '_' | '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '.' | '^'
-                        | '`' | '|' | '~'
+                    '-' | '_'
+                        | '!'
+                        | '#'
+                        | '$'
+                        | '%'
+                        | '&'
+                        | '\''
+                        | '*'
+                        | '+'
+                        | '.'
+                        | '^'
+                        | '`'
+                        | '|'
+                        | '~'
                 )
         })
 }
@@ -366,6 +378,9 @@ Received: from c.example by d.example\r\n\
             map.contains_key("x_spam_status"),
             "X_Spam_Status must be accepted (tchar allows underscore)"
         );
-        assert!(map.contains_key("x-normal"), "hyphenated header still accepted");
+        assert!(
+            map.contains_key("x-normal"),
+            "hyphenated header still accepted"
+        );
     }
 }

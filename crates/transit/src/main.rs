@@ -406,7 +406,6 @@ enum PipelineOutcome {
     TransientFailure,
 }
 
-
 /// Run `run_pipeline`, emit structured telemetry, and drive post-success hooks
 /// (IPNS publish + remote pin enqueue).  Common to the ingestion drain and the
 /// staging drain; the only difference is the success log message.
@@ -845,7 +844,7 @@ async fn main() {
                 if checkpoint.node_id != [0u8; 8] && checkpoint.node_id != node_id {
                     warn!(
                         checkpoint_node_id = hex::encode(checkpoint.node_id),
-                        instance_node_id   = hex::encode(node_id),
+                        instance_node_id = hex::encode(node_id),
                         "HLC checkpoint node_id differs from current instance node_id; \
                          node identity may have changed since last run"
                     );

@@ -43,13 +43,12 @@ pub async fn check_and_blacklist(
 ) -> Result<bool, StorageError> {
     // Read the current failure count without modifying it — the caller has
     // already incremented via record_rejected.
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT consecutive_failures FROM peers WHERE peer_id = ?",
-    )
-    .bind(peer_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| StorageError::Database(e.to_string()))?;
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT consecutive_failures FROM peers WHERE peer_id = ?")
+            .bind(peer_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| StorageError::Database(e.to_string()))?;
 
     let failures = match row {
         Some((f,)) => f,

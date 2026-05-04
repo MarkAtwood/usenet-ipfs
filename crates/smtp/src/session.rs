@@ -472,7 +472,11 @@ pub async fn run_session<S>(
                 if write_half.write_all(b"250 OK\r\n").await.is_err() {
                     break;
                 }
-                state = SessionState::Mail { ehlo_domain, from, require_tls };
+                state = SessionState::Mail {
+                    ehlo_domain,
+                    from,
+                    require_tls,
+                };
             }
 
             "RCPT" => {
@@ -532,7 +536,9 @@ pub async fn run_session<S>(
                         ref from,
                         ref to,
                         require_tls,
-                    } if !to.is_empty() => (ehlo_domain.clone(), from.clone(), to.clone(), require_tls),
+                    } if !to.is_empty() => {
+                        (ehlo_domain.clone(), from.clone(), to.clone(), require_tls)
+                    }
                     _ => {
                         if write_half
                             .write_all(b"503 Bad sequence of commands\r\n")

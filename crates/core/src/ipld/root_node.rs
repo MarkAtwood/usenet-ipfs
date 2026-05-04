@@ -14,9 +14,8 @@ where
 {
     let strings = Vec::<String>::deserialize(de)?;
     for s in &strings {
-        crate::article::GroupName::new(s.clone()).map_err(|e| {
-            serde::de::Error::custom(format!("invalid newsgroup name {s:?}: {e}"))
-        })?;
+        crate::article::GroupName::new(s.clone())
+            .map_err(|e| serde::de::Error::custom(format!("invalid newsgroup name {s:?}: {e}")))?;
     }
     Ok(strings)
 }

@@ -301,11 +301,10 @@ fn decoding_key_and_alg(jwk: &Jwk) -> Result<(DecodingKey, Algorithm), OidcError
                                 "EC curve '{other}' (no alg field; ES512/P-521 not supported)"
                             )))
                         }
-                        None => {
-                            return Err(OidcError::InvalidKey(
-                                "EC JWK has no 'alg' and no 'crv' field; cannot determine algorithm".into(),
-                            ))
-                        }
+                        None => return Err(OidcError::InvalidKey(
+                            "EC JWK has no 'alg' and no 'crv' field; cannot determine algorithm"
+                                .into(),
+                        )),
                     }
                 }
             };

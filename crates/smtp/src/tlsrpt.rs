@@ -71,7 +71,10 @@ impl TlsrptRecorder {
 
     /// Get all accumulated records (for testing / report generation).
     pub fn get_records(&self) -> std::collections::HashMap<String, Vec<TlsrptFailureRecord>> {
-        self.records.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.records
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

@@ -147,9 +147,7 @@ fn validate_stmt(stmt: &form::Stmt, depth: usize) -> Result<(), String> {
                         );
                     }
                     None => {
-                        return Err(
-                            ":comparator tag at end of statement with no name".to_string()
-                        );
+                        return Err(":comparator tag at end of statement with no name".to_string());
                     }
                 }
             }

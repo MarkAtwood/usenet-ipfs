@@ -443,7 +443,9 @@ mod tests {
     fn parse_list_active_with_wildmat() {
         assert_eq!(
             parse_command("LIST ACTIVE comp.*\r\n"),
-            Ok(Command::List(ListSubcommand::Active(Some("comp.*".to_string()))))
+            Ok(Command::List(ListSubcommand::Active(Some(
+                "comp.*".to_string()
+            ))))
         );
     }
 

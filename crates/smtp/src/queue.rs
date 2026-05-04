@@ -259,9 +259,8 @@ impl NntpQueue {
                                     format!("X-Stoa-Injection-Source: {injection_source}\r\n");
                                 let article = if let Some(signer) = &self.dkim_signer {
                                     // Build inject-header+body slice to sign.
-                                    let mut body = Vec::with_capacity(
-                                        inject_header.len() + bytes.len(),
-                                    );
+                                    let mut body =
+                                        Vec::with_capacity(inject_header.len() + bytes.len());
                                     body.extend_from_slice(inject_header.as_bytes());
                                     body.extend_from_slice(&bytes);
                                     // Sign the inject-header+body slice.
