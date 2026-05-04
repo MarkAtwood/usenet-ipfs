@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
+use stoa_core::util::is_loopback_addr;
 use stoa_mail::{
     config::{Config, LogFormat},
     server::{build_jmap_dispatcher, AppState, JmapStores},
@@ -54,6 +55,8 @@ async fn main() {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
+    stoa_core::emit_startup_banner(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     let addr = match config.listen.addr.parse::<std::net::SocketAddr>() {
         Ok(a) => a,
         Err(e) => {
@@ -70,6 +73,19 @@ async fn main() {
              (auth is in dev-mode); operator role designations have no effect in \
              dev-mode — add [[auth.users]] or auth.credential_file to enable authentication"
         );
+    }
+
+    // SECURITY: abort if dev mode is active on a non-loopback address (SOC2 CC6.1)
+    if config.auth.is_dev_mode() && !is_loopback_addr(&config.listen.addr) {
+        eprintln!(
+            "error: stoa-mail is configured in dev mode (auth.required = false, \
+no users configured) but is listening on a non-loopback address ({addr}). \
+This accepts any password from untrusted networks. \
+Either: (1) change listen.addr to 127.0.0.1 for local-only use, or \
+(2) set auth.required = true and configure auth.users or auth.credential_file.",
+            addr = config.listen.addr
+        );
+        std::process::exit(1);
     }
 
     let credential_store = match stoa_auth::build_credential_store(
@@ -246,12 +262,18 @@ async fn main() {
         mta_sts_domains: Arc::new(config.mta_sts.hosted_domains),
     });
 
+    // SECURITY: abort if ActivityPub HTTP signature verification is disabled on non-loopback (SOC2 CC6.1)
     if config.activitypub.enabled && !config.activitypub.verify_http_signatures {
-        warn!(
-            "ActivityPub HTTP signature verification is DISABLED — \
-             all inbound activities are accepted without authentication. \
-             Set verify_http_signatures = true in [activitypub] for production."
-        );
+        if !is_loopback_addr(&config.listen.addr) {
+            eprintln!(
+                "error: stoa-mail: activitypub.verify_http_signatures = false disables \
+HTTP signature verification, allowing any actor to forge inbound ActivityPub activities. \
+Set verify_http_signatures = true or change the listen address to 127.0.0.1."
+            );
+            std::process::exit(1);
+        } else {
+            warn!("activitypub HTTP signature verification is disabled; only safe on loopback");
+        }
     }
 
     let shutdown = async {

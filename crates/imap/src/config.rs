@@ -104,6 +104,23 @@ pub struct AuthConfig {
     /// with the same username.
     #[serde(default)]
     pub credential_file: Option<String>,
+    /// When `true`, authentication is mandatory regardless of whether any
+    /// users are configured.  Defaults to `false` for backward compatibility.
+    #[serde(default)]
+    pub required: bool,
+}
+
+impl AuthConfig {
+    /// Returns `true` when authentication is not configured.
+    ///
+    /// Checks `required`, `users`, and `credential_file` — the credential
+    /// sources IMAP currently supports. Unlike `stoa_reader::AuthConfig::is_dev_mode()`,
+    /// there is no check for OIDC providers or client certs because IMAP's
+    /// `AuthConfig` does not support those mechanisms. If IMAP gains OIDC or
+    /// client-cert support, update this method to include those fields.
+    pub fn is_dev_mode(&self) -> bool {
+        !self.required && self.users.is_empty() && self.credential_file.is_none()
+    }
 }
 
 fn default_mechanisms() -> Vec<String> {
@@ -179,6 +196,8 @@ impl Config {
         Ok(config)
     }
 
+    /// Validates the parsed configuration, returning an error if any required
+    /// invariants are violated (TLS file pairing, bcrypt-only passwords, etc.).
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.listen.addr.is_empty() {
             return Err(ConfigError::Validation(
@@ -421,5 +440,41 @@ max_command_size_bytes = 16384
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("should parse");
         assert_eq!(cfg.limits.max_command_size_bytes, 16384);
+    }
+
+    #[test]
+    fn test_imap_dev_mode_no_users() {
+        let auth = AuthConfig {
+            required: false,
+            users: vec![],
+            credential_file: None,
+            mechanisms: vec![],
+        };
+        assert!(auth.is_dev_mode());
+    }
+
+    #[test]
+    fn test_imap_not_dev_mode_required_true() {
+        let auth = AuthConfig {
+            required: true,
+            users: vec![],
+            credential_file: None,
+            mechanisms: vec![],
+        };
+        assert!(!auth.is_dev_mode());
+    }
+
+    #[test]
+    fn test_imap_not_dev_mode_has_users() {
+        let auth = AuthConfig {
+            required: false,
+            users: vec![UserCredential {
+                username: "alice".into(),
+                password: "x".into(),
+            }],
+            credential_file: None,
+            mechanisms: vec![],
+        };
+        assert!(!auth.is_dev_mode());
     }
 }

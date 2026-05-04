@@ -58,6 +58,8 @@ async fn main() {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
+    stoa_core::emit_startup_banner(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     let listener_25 = match TcpListener::bind(&config.listen.port_25).await {
         Ok(l) => l,
         Err(e) => {

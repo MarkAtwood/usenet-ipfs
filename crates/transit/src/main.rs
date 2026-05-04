@@ -513,6 +513,8 @@ async fn main() {
         .with(otel_log_layer)
         .init();
 
+    stoa_core::emit_startup_banner(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     info!(
         binary = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
@@ -738,7 +740,7 @@ async fn main() {
     // Do NOT remove this check for non-loopback listeners.
     // Enforce signing_key_path for non-loopback deployments (zn0k).
     if config.operator.signing_key_path.is_none()
-        && !stoa_transit::config::is_loopback_addr(&config.listen.addr)
+        && !stoa_core::util::is_loopback_addr(&config.listen.addr)
     {
         eprintln!(
             "error: operator.signing_key_path must be set when listening on a non-loopback \

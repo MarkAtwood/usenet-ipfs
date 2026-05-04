@@ -233,6 +233,7 @@ impl Config {
 mod tests {
     use super::*;
     use std::io::Write;
+    use stoa_core::util::is_loopback_addr;
     use tempfile::NamedTempFile;
 
     fn write_toml(content: &str) -> NamedTempFile {
@@ -412,5 +413,176 @@ required = false
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("should parse");
         assert_eq!(cfg.database.url, "sqlite:///var/lib/stoa/mail/mail.db");
+    }
+
+    // --- guard condition tests ---
+
+    #[test]
+    fn test_mail_dev_mode_guard_condition_non_loopback_triggers() {
+        // dev_mode=true + non-loopback → guard fires (condition is true)
+        let toml = r#"
+[listen]
+addr = "0.0.0.0:8080"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::from_file(f.path()).expect("should parse");
+        assert!(cfg.auth.is_dev_mode(), "auth should be in dev mode");
+        assert!(
+            !is_loopback_addr(&cfg.listen.addr),
+            "0.0.0.0 must not be loopback"
+        );
+        // Guard condition: dev_mode && !loopback → should abort
+        assert!(cfg.auth.is_dev_mode() && !is_loopback_addr(&cfg.listen.addr));
+    }
+
+    #[test]
+    fn test_mail_dev_mode_guard_condition_loopback_is_safe() {
+        // dev_mode=true + loopback → guard does NOT fire (condition is false)
+        let toml = r#"
+[listen]
+addr = "127.0.0.1:8080"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::from_file(f.path()).expect("should parse");
+        assert!(cfg.auth.is_dev_mode(), "auth should be in dev mode");
+        assert!(
+            is_loopback_addr(&cfg.listen.addr),
+            "127.0.0.1 must be loopback"
+        );
+        // Guard condition: dev_mode && !loopback → false (safe)
+        assert!(!(cfg.auth.is_dev_mode() && !is_loopback_addr(&cfg.listen.addr)));
+    }
+
+    #[test]
+    fn test_mail_dev_mode_guard_condition_auth_required_is_safe() {
+        // auth.required=true + non-loopback → guard does NOT fire
+        let toml = r#"
+[listen]
+addr = "0.0.0.0:443"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = true
+
+[[auth.users]]
+username = "alice"
+password = "$2b$12$KIXkB1XeBbcGZFxVf.DaGOd2sFHpLsmz/5oRCRY2z.ahE6Dc/l92S"
+
+[tls]
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::from_file(f.path()).expect("should parse");
+        assert!(
+            !cfg.auth.is_dev_mode(),
+            "auth with required=true and users is not dev mode"
+        );
+        // Guard condition: dev_mode && !loopback → false (safe, auth is required)
+        assert!(!(cfg.auth.is_dev_mode() && !is_loopback_addr(&cfg.listen.addr)));
+    }
+
+    #[test]
+    fn test_activitypub_sig_guard_condition_non_loopback_triggers() {
+        // activitypub.enabled + !verify_http_signatures + non-loopback → guard fires
+        let toml = r#"
+[listen]
+addr = "0.0.0.0:8080"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+
+[activitypub]
+enabled = true
+verify_http_signatures = false
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::from_file(f.path()).expect("should parse");
+        assert!(cfg.activitypub.enabled);
+        assert!(!cfg.activitypub.verify_http_signatures);
+        assert!(!is_loopback_addr(&cfg.listen.addr));
+        // Guard condition: enabled && !verify && !loopback → should abort
+        assert!(
+            cfg.activitypub.enabled
+                && !cfg.activitypub.verify_http_signatures
+                && !is_loopback_addr(&cfg.listen.addr)
+        );
+    }
+
+    #[test]
+    fn test_activitypub_sig_guard_condition_loopback_is_safe() {
+        // activitypub.enabled + !verify_http_signatures + loopback → guard does NOT fire
+        let toml = r#"
+[listen]
+addr = "127.0.0.1:8080"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+
+[activitypub]
+enabled = true
+verify_http_signatures = false
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::from_file(f.path()).expect("should parse");
+        assert!(cfg.activitypub.enabled);
+        assert!(!cfg.activitypub.verify_http_signatures);
+        assert!(is_loopback_addr(&cfg.listen.addr));
+        // Guard fires (enabled && !verify) but loopback branch → warn only, no exit
+        assert!(cfg.activitypub.enabled && !cfg.activitypub.verify_http_signatures);
+        assert!(is_loopback_addr(&cfg.listen.addr));
+    }
+
+    #[test]
+    fn test_activitypub_sig_guard_condition_verify_true_is_safe() {
+        // activitypub.enabled + verify_http_signatures=true → guard does NOT fire
+        let toml = r#"
+[listen]
+addr = "0.0.0.0:443"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+
+[activitypub]
+enabled = true
+verify_http_signatures = true
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::from_file(f.path()).expect("should parse");
+        assert!(cfg.activitypub.enabled);
+        assert!(cfg.activitypub.verify_http_signatures);
+        // Guard condition: enabled && !verify → false (verify is on)
+        assert!(!(cfg.activitypub.enabled && !cfg.activitypub.verify_http_signatures));
     }
 }

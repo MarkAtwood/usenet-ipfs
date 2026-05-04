@@ -5,6 +5,7 @@ pub mod audit;
 pub mod canonical;
 pub mod circuit_breaker;
 pub mod db_pool;
+pub mod env;
 pub mod error;
 pub mod group_log;
 pub mod hlc;
@@ -23,6 +24,7 @@ pub mod validation;
 pub mod wildmat;
 
 pub use article::{Article, ArticleHeader, GroupName};
+pub use env::{emit_startup_banner, RuntimeEnvironment};
 pub use error::{ProtocolError, SigningError, StorageError, UsenetIpfsError, ValidationError};
 pub use injection_source::{default_injection_source, InjectionSource};
 pub use ipld::{ArticleMetadata, ArticleRootNode, MimeNode};

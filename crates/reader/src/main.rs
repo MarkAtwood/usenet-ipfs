@@ -310,6 +310,8 @@ async fn main() {
         .with(otel_log_layer)
         .init();
 
+    stoa_core::emit_startup_banner(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     info!(
         binary = env!("CARGO_PKG_NAME"),
         version = env!("CARGO_PKG_VERSION"),
@@ -330,9 +332,9 @@ async fn main() {
         std::process::exit(0);
     }
 
-    // Enforce signing_key_path for non-loopback deployments (zn0k).
+    // SECURITY: signing_key_path is required for non-loopback deployments (SOC2 CC6.1, zn0k).
     if config.operator.signing_key_path.is_none()
-        && !stoa_reader::config::is_loopback_addr(&config.listen.addr)
+        && !stoa_core::util::is_loopback_addr(&config.listen.addr)
     {
         eprintln!(
             "error: operator.signing_key_path must be set when listening on a non-loopback \
@@ -343,16 +345,19 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Warn loudly when auth dev-mode is active on a non-loopback address.
+    // Abort when auth dev-mode is active on a non-loopback address.
     // Dev-mode (required=false, no users, no credential_file) accepts any password,
     // making the server an open relay if bound to a reachable interface.
-    if config.auth.is_dev_mode() && !stoa_reader::config::is_loopback_addr(&config.listen.addr) {
-        warn!(
-            listen_addr = %config.listen.addr,
-            "SECURITY WARNING: auth is in dev-mode (required=false, no users configured) \
-             but the server is listening on a non-loopback address — \
-             any password will be accepted; do not expose this to untrusted networks"
+    if config.auth.is_dev_mode() && !stoa_core::util::is_loopback_addr(&config.listen.addr) {
+        eprintln!(
+            "error: stoa-reader is configured in dev mode (auth.required = false, \
+no users configured) but is listening on a non-loopback address ({addr}). \
+This accepts any password from untrusted networks. \
+Either: (1) change listen.addr to 127.0.0.1 for local-only use, or \
+(2) set auth.required = true and configure auth.users or auth.credential_file.",
+            addr = config.listen.addr
         );
+        std::process::exit(1);
     }
 
     info!(

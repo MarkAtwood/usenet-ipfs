@@ -110,9 +110,9 @@ pub fn parse_rnews_batch(input: &[u8]) -> Result<Vec<Vec<u8>>, RnewsError> {
         let decompressed = decompress_gunbatch(&input[GUNBATCH_MARKER.len()..])?;
         parse_rnews_batch_plain(&decompressed)
     } else if input.starts_with(CUNBATCH_MARKER) {
-        return Err(RnewsError::UnsupportedCompression(
+        Err(RnewsError::UnsupportedCompression(
             "cunbatch (Unix compress .Z) is not supported; use gunbatch (gzip) instead".to_string(),
-        ));
+        ))
     } else {
         parse_rnews_batch_plain(input)
     }

@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::path::Path;
 use stoa_auth::looks_like_bcrypt_hash;
+pub use stoa_core::util::is_loopback_addr;
+use stoa_core::util::is_loopback_url_host;
 
 // Re-export stoa_auth::UserCredential so AuthConfig::users (Vec<UserCredential>)
 // resolves to the same type that stoa_auth::CredentialStore::from_credentials()
@@ -523,6 +525,14 @@ impl Config {
         Ok(config)
     }
 
+    /// Validates the parsed configuration against structural invariants that can
+    /// be evaluated at parse time (field combinations, URL formats, credential
+    /// pairings).
+    ///
+    /// Guards in `validate()` check structural config invariants that can be
+    /// evaluated at parse time (field combinations, URL formats, credential pairings).
+    /// Guards in `main.rs` check runtime invariants that require context not available
+    /// at parse time (listen address resolution, signing key file existence).
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.listen.addr.is_empty() {
             return Err(ConfigError::Validation(
@@ -630,6 +640,27 @@ impl Config {
                             }
                         }
                     }
+                    // Guard: allow_http = true with explicit credentials on a non-loopback
+                    // S3-compatible endpoint transmits AWS keys in cleartext.
+                    if s3.allow_http.unwrap_or(false)
+                        && (s3.access_key_id.is_some() || s3.secret_access_key.is_some())
+                    {
+                        if let Some(endpoint_url) = &s3.endpoint {
+                            if !is_loopback_url_host(endpoint_url) {
+                                let host_display = endpoint_url
+                                    .find("://")
+                                    .map(|i| &endpoint_url[i + 3..])
+                                    .and_then(|s| s.split('/').next())
+                                    .unwrap_or("(endpoint)");
+                                return Err(ConfigError::Validation(format!(
+                                     "backend.s3.allow_http = true with credentials configured \
+                                      transmits your access keys in cleartext to {host_display}. \
+                                      Use https:// and set allow_http = false, \
+                                      or change the endpoint to a loopback address for local testing."
+                                 )));
+                            }
+                        }
+                    }
                 }
                 BackendType::Azure => {
                     let azure = backend.azure.as_ref().ok_or_else(|| {
@@ -653,11 +684,43 @@ impl Config {
                              use_emulator implies the Azurite well-known URL".into(),
                         ));
                     }
+                    if azure.use_emulator.unwrap_or(false) && !is_loopback_addr(&self.listen.addr) {
+                        return Err(ConfigError::Validation(format!(
+                            "backend.azure.use_emulator = true is a local development setting \
+                             (Azurite). The daemon is listening on {} which is a non-loopback \
+                             address. Set listen.addr to 127.0.0.1 for local testing, or set \
+                             use_emulator = false for production Azure.",
+                            self.listen.addr
+                        )));
+                    }
                     if let Some(v) = azure.access_key.as_deref() {
                         if v.starts_with("secretx:") {
                             if let Err(e) = secretx::from_uri(v) {
                                 return Err(ConfigError::Validation(format!(
                                     "backend.azure.access_key: invalid secretx URI: {e}"
+                                )));
+                            }
+                        }
+                    }
+                    // Fatal guard: allow_http = true with an access_key on a
+                    // non-loopback custom endpoint transmits credentials in cleartext.
+                    // Azurite (use_emulator = true) is always loopback — skip that case.
+                    if azure.allow_http.unwrap_or(false)
+                        && azure.access_key.is_some()
+                        && !azure.use_emulator.unwrap_or(false)
+                    {
+                        if let Some(endpoint_url) = &azure.endpoint {
+                            if !is_loopback_url_host(endpoint_url) {
+                                let host_display = endpoint_url
+                                    .find("://")
+                                    .map(|i| &endpoint_url[i + 3..])
+                                    .and_then(|s| s.split('/').next())
+                                    .unwrap_or("(endpoint)");
+                                return Err(ConfigError::Validation(format!(
+                                    "backend.azure.allow_http = true with access_key configured \
+                                     transmits your credentials in cleartext to {host_display}. \
+                                     Use https:// and set allow_http = false, \
+                                     or change the endpoint to a loopback address for local testing."
                                 )));
                             }
                         }
@@ -735,6 +798,25 @@ impl Config {
                                 )));
                             }
                         }
+                    }
+                    // Fatal guard: allow_http = true with credentials on a non-loopback
+                    // host transmits the password in cleartext over the network.
+                    if webdav.allow_http.unwrap_or(false)
+                        && webdav.password.is_some()
+                        && !is_loopback_url_host(&webdav.url)
+                    {
+                        let host_display = webdav
+                            .url
+                            .find("://")
+                            .map(|i| &webdav.url[i + 3..])
+                            .and_then(|s| s.split('/').next())
+                            .unwrap_or("(url)");
+                        return Err(ConfigError::Validation(format!(
+                            "backend.webdav.allow_http = true with credentials configured \
+                             transmits your password in cleartext to {host_display}. \
+                             Use https:// and set allow_http = false, \
+                             or change the URL to a loopback address for local testing."
+                        )));
                     }
                 }
                 BackendType::RocksDb => {
@@ -844,18 +926,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-}
-
-/// Returns true if the given bind address is a loopback address.
-pub fn is_loopback_addr(addr: &str) -> bool {
-    // Parse host from "host:port"
-    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
-    // Strip brackets from IPv6 [::1]
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.is_loopback(),
-        Err(_) => host == "localhost",
     }
 }
 
@@ -2509,5 +2579,251 @@ api_url = "http://127.0.0.1:5001"
             !auth.is_dev_mode(),
             "trusted_issuers configured must not be dev mode"
         );
+    }
+
+    #[test]
+    fn dev_mode_nonloopback_guard_condition() {
+        // Verify the guard condition: dev_mode + non-loopback triggers,
+        // dev_mode + loopback does not.
+        let auth = AuthConfig {
+            required: false,
+            users: vec![],
+            credential_file: None,
+            client_certs: vec![],
+            trusted_issuers: vec![],
+            oidc_providers: vec![],
+            drain_username: None,
+        };
+        assert!(
+            auth.is_dev_mode(),
+            "no credentials + required=false must be dev mode"
+        );
+        assert!(
+            !is_loopback_addr("0.0.0.0:1119"),
+            "0.0.0.0 must not be loopback"
+        );
+        assert!(
+            is_loopback_addr("127.0.0.1:1119"),
+            "127.0.0.1 must be loopback"
+        );
+
+        // Guard fires only when both conditions hold.
+        let should_abort = auth.is_dev_mode() && !is_loopback_addr("0.0.0.0:1119");
+        assert!(
+            should_abort,
+            "guard must trigger for dev-mode on non-loopback"
+        );
+
+        let should_not_abort = auth.is_dev_mode() && !is_loopback_addr("127.0.0.1:1119");
+        assert!(
+            !should_not_abort,
+            "guard must not trigger for dev-mode on loopback"
+        );
+    }
+
+    // ── is_loopback_url_host unit tests ──────────────────────────────────────
+
+    #[test]
+    fn loopback_url_host_localhost() {
+        assert!(is_loopback_url_host("http://localhost/path"));
+        assert!(is_loopback_url_host("http://localhost:8080/path"));
+    }
+
+    #[test]
+    fn loopback_url_host_127() {
+        assert!(is_loopback_url_host("http://127.0.0.1/path"));
+        assert!(is_loopback_url_host("http://127.0.0.1:8080/path"));
+    }
+
+    #[test]
+    fn loopback_url_host_ipv6() {
+        assert!(is_loopback_url_host("http://[::1]/path"));
+        assert!(is_loopback_url_host("http://[::1]:8080/path"));
+    }
+
+    #[test]
+    fn non_loopback_url_host_public_ip() {
+        assert!(!is_loopback_url_host("http://192.168.1.10:8080/path"));
+        assert!(!is_loopback_url_host("http://203.0.113.1/dav"));
+    }
+
+    #[test]
+    fn non_loopback_url_host_domain() {
+        assert!(!is_loopback_url_host("http://dav.example.com/path"));
+    }
+
+    #[test]
+    fn loopback_url_host_no_scheme_is_non_loopback() {
+        // A malformed URL with no scheme is treated as non-loopback (fail-safe).
+        assert!(!is_loopback_url_host("dav.example.com/path"));
+    }
+
+    // ── WebDAV allow_http + credentials guard tests ───────────────────────────
+
+    const READER_WEBDAV_PREFIX: &str = r#"
+[listen]
+addr = "127.0.0.1:119"
+
+[limits]
+max_connections = 10
+command_timeout_secs = 30
+
+[auth]
+required = false
+
+[tls]
+
+[backend]
+type = "web_dav"
+
+"#;
+
+    /// allow_http = true + password on a non-loopback URL is a fatal validation error.
+    #[test]
+    fn webdav_allow_http_with_password_nonloopback_rejected() {
+        let toml = format!(
+            r#"{}
+[backend.webdav]
+url = "http://dav.example.com/stoa/blocks"
+username = "user"
+password = "secret"
+allow_http = true
+"#,
+            READER_WEBDAV_PREFIX
+        );
+        let f = write_toml(&toml);
+        let err = Config::from_file(f.path())
+            .expect_err("allow_http + credentials on non-loopback must fail");
+        assert!(
+            matches!(err, ConfigError::Validation(_)),
+            "expected Validation error, got {err:?}"
+        );
+        // Error message must mention allow_http and must NOT contain the password.
+        if let ConfigError::Validation(msg) = &err {
+            assert!(
+                msg.contains("allow_http"),
+                "error must mention allow_http: {msg}"
+            );
+            assert!(
+                !msg.contains("secret"),
+                "error must not contain the password: {msg}"
+            );
+        }
+    }
+
+    /// allow_http = true + password on a loopback URL is accepted (local testing).
+    #[test]
+    fn webdav_allow_http_with_password_loopback_accepted() {
+        let toml = format!(
+            r#"{}
+[backend.webdav]
+url = "http://127.0.0.1:8080/stoa/blocks"
+username = "user"
+password = "secret"
+allow_http = true
+"#,
+            READER_WEBDAV_PREFIX
+        );
+        let f = write_toml(&toml);
+        Config::from_file(f.path()).expect("allow_http + credentials on loopback must be accepted");
+    }
+
+    /// allow_http = true without a password is accepted (no credential exposure risk).
+    #[test]
+    fn webdav_allow_http_no_password_accepted() {
+        let toml = format!(
+            r#"{}
+[backend.webdav]
+url = "http://dav.example.com/stoa/blocks"
+allow_http = true
+"#,
+            READER_WEBDAV_PREFIX
+        );
+        let f = write_toml(&toml);
+        Config::from_file(f.path()).expect("allow_http without credentials must be accepted");
+    }
+
+    /// allow_http = true + password on localhost hostname is accepted.
+    #[test]
+    fn webdav_allow_http_with_password_localhost_accepted() {
+        let toml = format!(
+            r#"{}
+[backend.webdav]
+url = "http://localhost:8080/stoa/blocks"
+username = "user"
+password = "secret"
+allow_http = true
+"#,
+            READER_WEBDAV_PREFIX
+        );
+        let f = write_toml(&toml);
+        Config::from_file(f.path())
+            .expect("allow_http + credentials on localhost must be accepted");
+    }
+
+    /// use_emulator = true on a non-loopback listen address is a fatal error.
+    #[test]
+    fn test_azure_emulator_nonloopback_is_error() {
+        let toml = r#"
+[listen]
+addr = "0.0.0.0:119"
+
+[limits]
+max_connections = 10
+command_timeout_secs = 30
+
+[auth]
+required = false
+
+[tls]
+
+[backend]
+type = "azure"
+
+[backend.azure]
+account = "devstoreaccount1"
+container = "stoa-articles"
+use_emulator = true
+"#;
+        let f = write_toml(toml);
+        let err = Config::from_file(f.path())
+            .expect_err("use_emulator=true on non-loopback must fail validation");
+        assert!(
+            matches!(err, ConfigError::Validation(_)),
+            "expected Validation error, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("0.0.0.0"),
+            "error message must include the listen address, got: {msg}"
+        );
+    }
+
+    /// use_emulator = true on a loopback listen address is accepted.
+    #[test]
+    fn test_azure_emulator_loopback_is_ok() {
+        let toml = r#"
+[listen]
+addr = "127.0.0.1:119"
+
+[limits]
+max_connections = 10
+command_timeout_secs = 30
+
+[auth]
+required = false
+
+[tls]
+
+[backend]
+type = "azure"
+
+[backend.azure]
+account = "devstoreaccount1"
+container = "stoa-articles"
+use_emulator = true
+"#;
+        let f = write_toml(toml);
+        Config::from_file(f.path()).expect("use_emulator=true on loopback must be accepted");
     }
 }

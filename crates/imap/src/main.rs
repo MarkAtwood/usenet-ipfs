@@ -54,7 +54,22 @@ async fn main() {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
+    stoa_core::emit_startup_banner(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
     info!(addr = %config.listen.addr, "stoa-imap starting");
+
+    // SECURITY: abort if dev mode is active on a non-loopback address (SOC2 CC6.1)
+    if config.auth.is_dev_mode() && !stoa_core::util::is_loopback_addr(&config.listen.addr) {
+        eprintln!(
+            "error: stoa-imap is configured in dev mode (auth.required = false, \
+no users configured) but is listening on a non-loopback address ({addr}). \
+This accepts any password from untrusted networks. \
+Either: (1) change listen.addr to 127.0.0.1 for local-only use, or \
+(2) set auth.required = true and configure auth.users or auth.credential_file.",
+            addr = config.listen.addr
+        );
+        std::process::exit(1);
+    }
 
     // Open SQLite pool and run migrations.
     let db_url = format!("sqlite:{}?mode=rwc", config.database.path);

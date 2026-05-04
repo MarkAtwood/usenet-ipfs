@@ -30,19 +30,11 @@ use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use tracing::info;
 
+use stoa_core::util::is_loopback_addr;
+
 use crate::config::{Config, MtaStsMode};
 use crate::session::SieveCache;
 use crate::store;
-
-/// Returns `true` if `addr` resolves to a loopback address.
-fn is_loopback_addr(addr: &str) -> bool {
-    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.is_loopback(),
-        Err(_) => host == "localhost",
-    }
-}
 
 #[derive(Clone)]
 struct AdminState {
