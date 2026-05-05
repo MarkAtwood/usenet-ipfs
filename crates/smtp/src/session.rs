@@ -2222,7 +2222,7 @@ mod tests {
                 .expect("build acceptor"),
         );
         let queue_dir = tempfile::tempdir().expect("tempdir");
-        let nntp_queue = Arc::new(NntpQueue::new(queue_dir.path(), None).expect("NntpQueue"));
+        let nntp_queue = NntpQueue::new(queue_dir.path(), None).expect("NntpQueue");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -2281,7 +2281,7 @@ mod tests {
                 .expect("build acceptor"),
         );
         let queue_dir = tempfile::tempdir().expect("tempdir");
-        let nntp_queue = Arc::new(NntpQueue::new(queue_dir.path(), None).expect("NntpQueue"));
+        let nntp_queue = NntpQueue::new(queue_dir.path(), None).expect("NntpQueue");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -2760,7 +2760,7 @@ mod tests {
             tokio::spawn(async move {
                 let (stream, peer) = listener.accept().await.expect("accept");
                 run_session(
-                    stream,
+                    Box::new(stream),
                     true,
                     false,
                     peer.to_string(),
@@ -2810,7 +2810,7 @@ mod tests {
             tokio::spawn(async move {
                 let (stream, peer) = listener.accept().await.expect("accept");
                 run_session(
-                    stream,
+                    Box::new(stream),
                     false,
                     false,
                     peer.to_string(),
@@ -2860,7 +2860,7 @@ mod tests {
             tokio::spawn(async move {
                 let (stream, peer) = listener.accept().await.expect("accept");
                 run_session(
-                    stream,
+                    Box::new(stream),
                     false,
                     false,
                     peer.to_string(),
