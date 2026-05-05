@@ -44,11 +44,17 @@ prometheus = { version = "0.14", default-features = false }
 zeroize = "1"
 hickory-resolver = "=0.26.0-alpha.1"
 reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
+bytes = "1"
+# Optional SES dependencies — pulled in only under the 'ses' feature.
+aws-sdk-sesv2 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
 
 [features]
 aws   = ["secretx/aws-sm", "secretx/aws-ssm"]
 azure = ["secretx/azure-kv"]
 gcp   = ["secretx/gcp-sm"]
+ses   = ["aws-sdk-sesv2", "aws-config"]
 
 [dev-dependencies]
 bcrypt = "0.15"
@@ -56,3 +62,4 @@ rcgen = "0.13"
 # test-util enables tokio::time::pause() and tokio::time::advance() for
 # deterministic timeout testing without real sleeps.
 tokio = { version = "1", features = ["test-util"] }
+wiremock = "0.6"

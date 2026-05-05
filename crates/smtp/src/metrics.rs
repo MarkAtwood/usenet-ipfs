@@ -186,6 +186,49 @@ pub fn inc_relay_enqueue_failure() {
     RELAY_ENQUEUE_FAILURES_TOTAL.inc();
 }
 
+// ── OutboundMailer / RoutingMailer metrics ──────────────────────────────────
+
+/// Total send attempts through the OutboundMailer abstraction, labelled by
+/// provider name and result (`"ok"`, `"transient"`, `"permanent"`, `"skipped"`).
+static OUTBOUND_SEND_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    register_counter_vec!(
+        Opts::new(
+            "outbound_send_total",
+            "Total send attempts through the OutboundMailer abstraction, by provider and result"
+        ),
+        &["provider", "result"]
+    )
+    .expect("failed to register outbound_send_total")
+});
+
+/// Increment the `outbound_send_total` counter for `provider` with `result`.
+///
+/// Recommended `result` values: `"ok"`, `"transient"`, `"permanent"`, `"skipped"`.
+pub fn inc_outbound_send(provider: &str, result: &str) {
+    OUTBOUND_SEND_TOTAL
+        .with_label_values(&[provider, result])
+        .inc();
+}
+
+/// Current health state of an outbound provider: 1.0 = healthy, 0.0 = unhealthy.
+static OUTBOUND_PROVIDER_HEALTHY: LazyLock<GaugeVec> = LazyLock::new(|| {
+    register_gauge_vec!(
+        Opts::new(
+            "outbound_provider_healthy",
+            "Outbound provider health: 1 = healthy, 0 = unhealthy"
+        ),
+        &["provider"]
+    )
+    .expect("failed to register outbound_provider_healthy")
+});
+
+/// Set the health gauge for `provider`: `true` → 1.0, `false` → 0.0.
+pub fn set_outbound_provider_healthy(provider: &str, healthy: bool) {
+    OUTBOUND_PROVIDER_HEALTHY
+        .with_label_values(&[provider])
+        .set(if healthy { 1.0 } else { 0.0 });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +296,38 @@ mod tests {
         let before = RELAY_ENQUEUE_FAILURES_TOTAL.get();
         inc_relay_enqueue_failure();
         let after = RELAY_ENQUEUE_FAILURES_TOTAL.get();
+        assert_eq!(after, before + 1.0);
+    }
+
+    // Oracle: set_outbound_provider_healthy sets gauge to 1.0 (healthy) and 0.0 (unhealthy).
+    #[test]
+    fn set_outbound_provider_healthy_sets_gauge() {
+        set_outbound_provider_healthy("test-outbound-provider", true);
+        assert_eq!(
+            OUTBOUND_PROVIDER_HEALTHY
+                .with_label_values(&["test-outbound-provider"])
+                .get(),
+            1.0
+        );
+        set_outbound_provider_healthy("test-outbound-provider", false);
+        assert_eq!(
+            OUTBOUND_PROVIDER_HEALTHY
+                .with_label_values(&["test-outbound-provider"])
+                .get(),
+            0.0
+        );
+    }
+
+    // Oracle: inc_outbound_send increments outbound_send_total.
+    #[test]
+    fn inc_outbound_send_increments_counter() {
+        let before = OUTBOUND_SEND_TOTAL
+            .with_label_values(&["test-provider", "ok"])
+            .get();
+        inc_outbound_send("test-provider", "ok");
+        let after = OUTBOUND_SEND_TOTAL
+            .with_label_values(&["test-provider", "ok"])
+            .get();
         assert_eq!(after, before + 1.0);
     }
 }

@@ -154,6 +154,26 @@ impl PeerHealthState {
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
     }
+
+    /// Returns `true` if at least one peer is currently eligible for delivery
+    /// (either marked up or its backoff window has elapsed).
+    ///
+    /// Used by [`SmtpRelayMailer::healthy`] to implement the
+    /// [`OutboundMailer::healthy`] contract without consuming the selection
+    /// cursor.
+    pub fn has_healthy_peer(&self) -> bool {
+        if self.peers.is_empty() {
+            return false;
+        }
+        let now = Instant::now();
+        self.peers.iter().any(|(_, status)| {
+            status.is_up
+                || status.last_failure.is_none()
+                || status
+                    .last_failure
+                    .is_some_and(|t| now.duration_since(t) >= self.down_backoff)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -280,5 +300,43 @@ mod tests {
             status.attempt_count, 2,
             "select_peer must increment attempt_count"
         );
+    }
+
+    // Oracle: has_healthy_peer with no peers returns false.
+    #[test]
+    fn has_healthy_peer_empty_is_false() {
+        let state = PeerHealthState::new(vec![], Duration::from_secs(300));
+        assert!(!state.has_healthy_peer());
+    }
+
+    // Oracle: has_healthy_peer with one up peer returns true.
+    #[test]
+    fn has_healthy_peer_one_up_is_true() {
+        let state = PeerHealthState::new(
+            vec![make_peer("smtp1.example.com")],
+            Duration::from_secs(300),
+        );
+        assert!(state.has_healthy_peer());
+    }
+
+    // Oracle: has_healthy_peer after marking sole peer down within backoff returns false.
+    #[test]
+    fn has_healthy_peer_all_down_within_backoff_is_false() {
+        let mut state = PeerHealthState::new(
+            vec![make_peer("smtp1.example.com")],
+            Duration::from_secs(300),
+        );
+        state.mark_down(0);
+        assert!(!state.has_healthy_peer());
+    }
+
+    // Oracle: has_healthy_peer after backoff elapsed returns true again.
+    #[test]
+    fn has_healthy_peer_backoff_elapsed_is_true() {
+        let backoff = Duration::from_millis(1);
+        let mut state = PeerHealthState::new(vec![make_peer("smtp1.example.com")], backoff);
+        state.mark_down(0);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(state.has_healthy_peer());
     }
 }
