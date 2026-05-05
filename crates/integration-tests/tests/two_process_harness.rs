@@ -272,6 +272,7 @@ async fn transit_reader_shared_store() {
         oidc_store: None,
         mail_complaints_to: None,
         max_clock_skew_secs: None,
+        staging_pool: None,
     });
 
     // ── Transit stores ────────────────────────────────────────────────────────

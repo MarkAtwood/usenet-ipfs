@@ -76,6 +76,12 @@ pub struct ServerStores {
     /// OIDC JWT validator for SASL OAUTHBEARER (RFC 7628).
     /// `None` when no `[[auth.oidc_providers]]` entries are configured.
     pub oidc_store: Option<Arc<OidcStore>>,
+    /// Read-only pool to the transit daemon's SQLite database (transit_staging).
+    ///
+    /// When `Some`, ARTICLE/HEAD/BODY/STAT handlers consult the staging table as
+    /// a fallback when a Message-ID is not yet in the block store.  Set via
+    /// `database.transit_url` in reader.toml.  `None` disables the fallback.
+    pub staging_pool: Option<Arc<sqlx::AnyPool>>,
 }
 
 impl ServerStores {
@@ -152,6 +158,25 @@ impl ServerStores {
             Some(Arc::new(OidcStore::new(config.auth.oidc_providers.clone())))
         };
 
+        // Open a read-only connection pool to the transit daemon's SQLite DB for
+        // the staging fallback (stoa-psd6m).  No migrations are run — the schema
+        // is owned by the transit daemon.  Pool size 1 is sufficient for the
+        // low-frequency staging lookups that only occur during the window between
+        // article acceptance and IPFS pipeline completion.
+        let staging_pool = if let Some(ref url) = config.database.transit_url {
+            match stoa_core::db_pool::try_open_any_pool(url, 1).await {
+                Ok(p) => {
+                    tracing::info!(transit_url = url, "staging fallback pool opened");
+                    Some(Arc::new(p))
+                }
+                Err(e) => {
+                    return Err(format!("failed to open transit staging pool '{url}': {e}"));
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             ipfs_store,
             msgid_map: Arc::new(MsgIdMap::new(core_pool)),
@@ -186,6 +211,7 @@ impl ServerStores {
                 DEFAULT_MAX_ENTRIES,
             ))),
             oidc_store,
+            staging_pool,
         })
     }
 
@@ -259,6 +285,7 @@ impl ServerStores {
                 DEFAULT_MAX_ENTRIES,
             ))),
             oidc_store: None,
+            staging_pool: None,
         }
     }
 }

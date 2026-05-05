@@ -86,6 +86,16 @@ pub struct DatabaseConfig {
     /// Created if it does not exist (SQLite). Default: `sqlite:///reader_verify.db`.
     #[serde(default = "DatabaseConfig::default_verify_url")]
     pub verify_url: String,
+    /// URL for the transit-schema database (transit_staging).
+    ///
+    /// When set, the reader opens a read-only connection pool to the transit
+    /// daemon's database so that ARTICLE/HEAD/BODY/STAT commands can serve
+    /// articles that are staged but not yet written to IPFS.  Set this to the
+    /// same value as transit's `database.url` (`sqlite:///transit.db`).
+    ///
+    /// Optional.  When absent, staged-but-not-yet-IPFS articles return 430.
+    #[serde(default)]
+    pub transit_url: Option<String>,
 }
 
 impl DatabaseConfig {
@@ -106,6 +116,7 @@ impl Default for DatabaseConfig {
             reader_url: Self::default_reader_url(),
             core_url: Self::default_core_url(),
             verify_url: Self::default_verify_url(),
+            transit_url: None,
         }
     }
 }

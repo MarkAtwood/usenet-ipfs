@@ -44,7 +44,11 @@ use crate::{
         response::Response,
         state::SessionState,
     },
-    store::{overview::extract_overview, server_stores::ServerStores},
+    store::{
+        overview::extract_overview,
+        server_stores::ServerStores,
+        staging_fallback::{fetch_from_staging, StagingResult},
+    },
 };
 
 /// Whether this listener accepts plain NNTP or implicit-TLS (NNTPS) connections.
@@ -1432,7 +1436,7 @@ async fn fetch_article_wire_bytes(
 
 /// Look up an article by Message-ID from stores and return a 220/430 response.
 async fn lookup_article_by_msgid(stores: &ServerStores, msgid: &str) -> Response {
-    let (cid, header_bytes, body_bytes) = match resolve_msgid_to_wire(stores, msgid).await {
+    let (cid_opt, header_bytes, body_bytes) = match resolve_msgid_to_wire(stores, msgid).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1445,17 +1449,21 @@ async fn lookup_article_by_msgid(stores: &ServerStores, msgid: &str) -> Response
         .ok()
         .flatten()
         .and_then(|r| r.did_sig_valid);
-    let verifications = stores
-        .verification_store
-        .get_verifications(&cid)
-        .await
-        .unwrap_or_default();
+    let verifications = if let Some(ref cid) = cid_opt {
+        stores
+            .verification_store
+            .get_verifications(cid)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     article_response(&ArticleContent {
         article_number: 0,
         message_id: msgid.to_string(),
         header_bytes,
         body_bytes,
-        cid: Some(cid),
+        cid: cid_opt,
         did_sig_valid,
         verifications,
     })
@@ -1532,10 +1540,25 @@ async fn lookup_article_content_by_number(
 ///
 /// Returns 223 with `0 <msgid>` if the article is known, 430 if not found.
 /// RFC 3977 §6.2.4: STAT <msgid> does not require a currently selected group.
+///
+/// When the block store has no record and a staging pool is configured, the
+/// staging table is consulted as a fallback (stoa-psd6m).
 async fn stat_by_msgid(stores: &ServerStores, msgid: &str) -> Response {
     match stores.msgid_map.lookup_by_msgid(msgid).await {
         Ok(Some(_)) => Response::article_exists(0, msgid),
-        Ok(None) => Response::no_article_with_message_id(),
+        Ok(None) => {
+            // Not in block store — check transit staging.
+            if let Some(ref pool) = stores.staging_pool {
+                match fetch_from_staging(pool, msgid).await {
+                    StagingResult::Found(_) => {
+                        debug!(msgid, "STAT: article found in transit staging (pre-IPFS)");
+                        return Response::article_exists(0, msgid);
+                    }
+                    StagingResult::NotStaged | StagingResult::Error => {}
+                }
+            }
+            Response::no_article_with_message_id()
+        }
         Err(e) => {
             warn!("msgid_map lookup error for STAT {msgid}: {e}");
             Response::program_fault()
@@ -1545,7 +1568,7 @@ async fn stat_by_msgid(stores: &ServerStores, msgid: &str) -> Response {
 
 /// HEAD <msgid>: look up an article by Message-ID and return headers only.
 async fn lookup_head_by_msgid(stores: &ServerStores, msgid: &str) -> Response {
-    let (cid, header_bytes, body_bytes) = match resolve_msgid_to_wire(stores, msgid).await {
+    let (cid_opt, header_bytes, body_bytes) = match resolve_msgid_to_wire(stores, msgid).await {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1556,17 +1579,21 @@ async fn lookup_head_by_msgid(stores: &ServerStores, msgid: &str) -> Response {
         .ok()
         .flatten()
         .and_then(|r| r.did_sig_valid);
-    let verifications = stores
-        .verification_store
-        .get_verifications(&cid)
-        .await
-        .unwrap_or_default();
+    let verifications = if let Some(ref cid) = cid_opt {
+        stores
+            .verification_store
+            .get_verifications(cid)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     head_response(&ArticleContent {
         article_number: 0,
         message_id: msgid.to_string(),
         header_bytes,
         body_bytes,
-        cid: Some(cid),
+        cid: cid_opt,
         did_sig_valid,
         verifications,
     })
@@ -1574,55 +1601,87 @@ async fn lookup_head_by_msgid(stores: &ServerStores, msgid: &str) -> Response {
 
 /// BODY <msgid>: look up an article by Message-ID and return body only.
 async fn lookup_body_by_msgid(stores: &ServerStores, msgid: &str) -> Response {
-    let (cid, header_bytes, body_bytes) = match resolve_msgid_to_wire(stores, msgid).await {
+    let (cid_opt, header_bytes, body_bytes) = match resolve_msgid_to_wire(stores, msgid).await {
         Ok(t) => t,
         Err(r) => return r,
     };
-    let verifications = stores
-        .verification_store
-        .get_verifications(&cid)
-        .await
-        .unwrap_or_default();
+    let verifications = if let Some(ref cid) = cid_opt {
+        stores
+            .verification_store
+            .get_verifications(cid)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     body_response(&ArticleContent {
         article_number: 0,
         message_id: msgid.to_string(),
         header_bytes,
         body_bytes,
-        cid: Some(cid),
+        cid: cid_opt,
         did_sig_valid: None,
         verifications,
     })
 }
 
-/// Resolve a Message-ID to its CID and split wire bytes `(header, body)`.
+/// Resolve a Message-ID to an optional CID and split wire bytes `(cid_opt, header, body)`.
 ///
 /// Shared scaffold for `lookup_article_by_msgid`, `lookup_head_by_msgid`, and
 /// `lookup_body_by_msgid`: performs the msgid-map lookup, IPFS fetch, and
 /// header/body split that all three commands require.
+///
+/// When the block store has no record for `msgid` and a staging pool is
+/// configured, the function falls back to reading the raw article bytes from
+/// the transit staging table (stoa-psd6m).  The staging path returns
+/// `cid_opt = None` because the article has not yet been committed to IPFS;
+/// callers must propagate this `None` to `ArticleContent.cid` so that
+/// `X-Stoa-CID` is omitted from the response.
 ///
 /// Returns `Err(Response)` with 430 (not found) or 500 (storage error) so the
 /// caller can return early via `match … { Err(r) => return r, Ok(t) => t }`.
 async fn resolve_msgid_to_wire(
     stores: &ServerStores,
     msgid: &str,
-) -> Result<(cid::Cid, Vec<u8>, Vec<u8>), Response> {
-    let cid = match stores.msgid_map.lookup_by_msgid(msgid).await {
-        Ok(Some(c)) => c,
-        Ok(None) => return Err(Response::no_article_with_message_id()),
+) -> Result<(Option<cid::Cid>, Vec<u8>, Vec<u8>), Response> {
+    match stores.msgid_map.lookup_by_msgid(msgid).await {
+        Ok(Some(cid)) => {
+            let wire_bytes = match fetch_article_wire_bytes(stores.ipfs_store.as_ref(), &cid).await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("fetch_article_wire_bytes error for cid {cid}: {e}");
+                    return Err(Response::program_fault());
+                }
+            };
+            let (header_bytes, body_bytes) = split_article(&wire_bytes);
+            Ok((Some(cid), header_bytes, body_bytes))
+        }
+        Ok(None) => {
+            // Article not in block store — check the transit staging area.
+            if let Some(ref pool) = stores.staging_pool {
+                match fetch_from_staging(pool, msgid).await {
+                    StagingResult::Found(wire_bytes) => {
+                        let (header_bytes, body_bytes) = split_article(&wire_bytes);
+                        // No CID yet: article is staged but not committed to IPFS.
+                        // cid: None causes callers to omit X-Stoa-CID from the response,
+                        // which is correct — there is no content address to report yet.
+                        debug!(msgid, "serving article from transit staging (pre-IPFS)");
+                        return Ok((None, header_bytes, body_bytes));
+                    }
+                    StagingResult::NotStaged => {}
+                    StagingResult::Error => {
+                        // Staging lookup failed; fall through to 430.
+                    }
+                }
+            }
+            Err(Response::no_article_with_message_id())
+        }
         Err(e) => {
             warn!("msgid_map lookup error for {msgid}: {e}");
-            return Err(Response::program_fault());
+            Err(Response::program_fault())
         }
-    };
-    let wire_bytes = match fetch_article_wire_bytes(stores.ipfs_store.as_ref(), &cid).await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("fetch_article_wire_bytes error for cid {cid}: {e}");
-            return Err(Response::program_fault());
-        }
-    };
-    let (header_bytes, body_bytes) = split_article(&wire_bytes);
-    Ok((cid, header_bytes, body_bytes))
+    }
 }
 
 /// Decode a SASL OAUTHBEARER initial response (RFC 7628 §3.1) and extract

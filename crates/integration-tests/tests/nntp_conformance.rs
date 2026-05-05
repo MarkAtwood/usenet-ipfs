@@ -266,6 +266,7 @@ async fn nntp_conformance_via_nntplib() {
         oidc_store: None,
         mail_complaints_to: None,
         max_clock_skew_secs: None,
+        staging_pool: None,
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -518,6 +519,7 @@ async fn article_posted_writes_audit_row() {
         oidc_store: None,
         mail_complaints_to: None,
         max_clock_skew_secs: None,
+        staging_pool: None,
     });
 
     let config = Arc::new(reader_config("127.0.0.1:0"));
