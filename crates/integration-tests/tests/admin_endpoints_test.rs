@@ -57,6 +57,47 @@ fn free_loopback_port() -> u16 {
     listener.local_addr().expect("local_addr").port()
 }
 
+/// Send a raw GET request and return `(status_line, headers, body)`.
+async fn http_get_with_headers(addr: &str, path: &str) -> (String, Vec<String>, String) {
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).await.expect("read status line");
+    let mut headers: Vec<String> = Vec::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read header");
+        let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
+        if trimmed.is_empty() {
+            break;
+        }
+        headers.push(trimmed);
+    }
+    let mut body = String::new();
+    reader.read_to_string(&mut body).await.expect("read body");
+    (status_line.trim_end_matches(['\r', '\n']).to_string(), headers, body)
+}
+
+/// Assert the five security headers are present with correct values.
+fn assert_security_headers(headers: &[String], context: &str) {
+    let expected: &[(&str, &str)] = &[
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "strict-origin-when-cross-origin"),
+        ("content-security-policy", "default-src 'none'"),
+        ("permissions-policy", "geolocation=(), microphone=(), camera=()"),
+    ];
+    for (name, value) in expected {
+        let found = headers.iter().any(|h| {
+            let lower = h.to_ascii_lowercase();
+            lower.starts_with(name) && h.contains(value)
+        });
+        assert!(found, "{context}: missing header {name}: {value}\nGot: {headers:#?}");
+    }
+}
+
 // ── /health ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -188,4 +229,54 @@ async fn admin_unknown_path_returns_404() {
         status.contains("404"),
         "unknown path must return 404, got: {status}"
     );
+}
+
+// ── Security response headers ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_health_has_security_headers() {
+    let port = free_loopback_port();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    start_admin_server(addr, Instant::now(), None, 60, Arc::new(vec![]))
+        .expect("start admin server");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (status, headers, _body) = http_get_with_headers(&format!("127.0.0.1:{port}"), "/health").await;
+    assert!(status.contains("200"), "expected 200, got: {status}");
+    assert_security_headers(&headers, "GET /health");
+}
+
+#[tokio::test]
+async fn admin_version_has_security_headers() {
+    let port = free_loopback_port();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    start_admin_server(addr, Instant::now(), None, 60, Arc::new(vec![]))
+        .expect("start admin server");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (status, headers, _body) = http_get_with_headers(&format!("127.0.0.1:{port}"), "/version").await;
+    assert!(status.contains("200"), "expected 200, got: {status}");
+    assert_security_headers(&headers, "GET /version");
+}
+
+#[tokio::test]
+async fn admin_metrics_has_security_headers() {
+    let port = free_loopback_port();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    start_admin_server(addr, Instant::now(), None, 60, Arc::new(vec![]))
+        .expect("start admin server");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (status, headers, _body) = http_get_with_headers(&format!("127.0.0.1:{port}"), "/metrics").await;
+    assert!(status.contains("200"), "expected 200, got: {status}");
+    assert_security_headers(&headers, "GET /metrics");
+}
+
+#[tokio::test]
+async fn admin_hsts_absent_on_plain_http() {
+    let port = free_loopback_port();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    start_admin_server(addr, Instant::now(), None, 60, Arc::new(vec![]))
+        .expect("start admin server");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (_status, headers, _body) = http_get_with_headers(&format!("127.0.0.1:{port}"), "/health").await;
+    let has_hsts = headers.iter().any(|h| h.to_ascii_lowercase().starts_with("strict-transport-security"));
+    assert!(!has_hsts, "admin server must NOT emit HSTS on plain TCP; got: {headers:#?}");
 }

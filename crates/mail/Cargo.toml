@@ -48,7 +48,7 @@ serde_ipld_dagcbor = "0.6"
 async-trait = "0.1"
 chrono = "0.4"
 prometheus = "0.14"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "set-header"] }
 
 [features]
 aws   = ["secretx/aws-sm", "secretx/aws-ssm"]

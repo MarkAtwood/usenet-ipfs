@@ -5773,6 +5773,7 @@ dependencies = [
  "sqlx",
  "stoa-auth",
  "stoa-core",
+ "stoa-mail",
  "stoa-reader",
  "stoa-transit",
  "stoa-verify",

@@ -4,12 +4,13 @@ use crate::jmap::backend::StoaBackend;
 use crate::jmap::backend_types::{Email, Mailbox, Thread};
 use axum::{
     extract::{DefaultBodyLimit, Extension, Request, State},
-    http::{header, HeaderMap, HeaderName, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
+use tower_http::set_header::SetResponseHeaderLayer;
 use jmap_server::{
     check_known_capabilities, handle_changes, handle_get, handle_query, request_error, Dispatcher,
     HandlerFuture, JmapHandler,
@@ -240,13 +241,41 @@ fn build_cors_layer(cors_config: &CorsConfig) -> CorsLayer {
         ]))
 }
 
+/// Build a `SetResponseHeaderLayer` that unconditionally overwrites `name` with `value`.
+fn security_header_layer(
+    name: &'static str,
+    value: &'static str,
+) -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        HeaderName::from_static(name),
+        HeaderValue::from_static(value),
+    )
+}
+
+/// Build a `SetResponseHeaderLayer` that sets `name` = `value` only when `active` is true.
+fn conditional_header_layer(
+    name: &'static str,
+    value: &'static str,
+    active: bool,
+) -> SetResponseHeaderLayer<impl Fn(&Response) -> Option<HeaderValue> + Clone> {
+    SetResponseHeaderLayer::overriding(HeaderName::from_static(name), move |_: &Response| {
+        if active {
+            Some(HeaderValue::from_static(value))
+        } else {
+            None
+        }
+    })
+}
+
 /// Build the axum Router with all routes.
 ///
 /// `GET /`, `/health`, `/metrics`, and `/.well-known/jmap` are public (no auth required).
 /// All `/jmap/*` routes are protected by `basic_auth_middleware`.
 /// The CORS layer (if enabled) wraps all routes.
+/// Security response headers are applied to every response.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors_layer = build_cors_layer(&state.cors);
+    let tls_active = state.base_url.starts_with("https://");
 
     let protected = Router::new()
         .route("/jmap/session", get(jmap_session_handler))
@@ -307,6 +336,25 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(protected)
         .layer(cors_layer)
         .layer(DefaultBodyLimit::max(MAX_BODY))
+        .layer(security_header_layer(
+            "permissions-policy",
+            "geolocation=(), microphone=(), camera=()",
+        ))
+        .layer(security_header_layer(
+            "content-security-policy",
+            "default-src 'none'",
+        ))
+        .layer(security_header_layer(
+            "referrer-policy",
+            "strict-origin-when-cross-origin",
+        ))
+        .layer(security_header_layer("x-frame-options", "DENY"))
+        .layer(security_header_layer("x-content-type-options", "nosniff"))
+        .layer(conditional_header_layer(
+            "strict-transport-security",
+            "max-age=63072000; includeSubDomains",
+            tls_active,
+        ))
         .with_state(state)
 }
 

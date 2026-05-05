@@ -358,7 +358,7 @@ async fn handle_admin_connection(
         let body = r#"{"error":"rate limit exceeded"}"#;
         let content_length = body.len();
         let response = format!(
-            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {retry_after}\r\nContent-Length: {content_length}\r\n\r\n{body}"
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {retry_after}\r\n{SECURITY_HEADERS}Content-Length: {content_length}\r\n\r\n{body}"
         );
         writer.write_all(response.as_bytes()).await?;
         return Ok(());
@@ -468,7 +468,7 @@ async fn handle_admin_connection(
             let body = crate::metrics::gather_metrics();
             let content_length = body.len();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {content_length}\r\n\r\n{body}"
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n{SECURITY_HEADERS}Content-Length: {content_length}\r\n\r\n{body}"
             );
             writer.write_all(response.as_bytes()).await?;
         }
@@ -768,6 +768,17 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+/// Standard security response headers injected into every admin HTTP response.
+///
+/// HSTS is intentionally absent: the admin server runs over plain TCP (no TLS),
+/// so sending HSTS would be incorrect and misleading.
+const SECURITY_HEADERS: &str = "\
+    X-Content-Type-Options: nosniff\r\n\
+    X-Frame-Options: DENY\r\n\
+    Referrer-Policy: strict-origin-when-cross-origin\r\n\
+    Content-Security-Policy: default-src 'none'\r\n\
+    Permissions-Policy: geolocation=(), microphone=(), camera=()\r\n";
+
 async fn write_json<W: AsyncWrite + Unpin>(
     writer: &mut W,
     status: u16,
@@ -776,7 +787,7 @@ async fn write_json<W: AsyncWrite + Unpin>(
 ) -> std::io::Result<()> {
     let content_length = body.len();
     let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\n\r\n{body}"
+        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\n{SECURITY_HEADERS}Content-Length: {content_length}\r\n\r\n{body}"
     );
     writer.write_all(response.as_bytes()).await
 }
@@ -788,7 +799,7 @@ async fn write_binary_car<W: AsyncWrite + Unpin>(
 ) -> std::io::Result<()> {
     let content_length = body.len();
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.ipld.car; version=1\r\nContent-Length: {content_length}\r\n\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.ipld.car; version=1\r\n{SECURITY_HEADERS}Content-Length: {content_length}\r\n\r\n"
     );
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(body).await
