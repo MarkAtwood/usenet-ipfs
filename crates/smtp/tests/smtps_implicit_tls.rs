@@ -306,6 +306,7 @@ async fn smtps_listener_binds_and_accepts_tcp() {
         listener_25,
         listener_587,
         Some((smtps_listener, tls_acceptor)),
+        None, // starttls_acceptor: use SMTPS, not STARTTLS on 25/587
         base_config(),
         nntp_queue,
         None,
@@ -342,6 +343,7 @@ async fn smtps_greeting_arrives_after_tls_handshake() {
         listener_25,
         listener_587,
         Some((smtps_listener, tls_acceptor)),
+        None, // starttls_acceptor: use SMTPS, not STARTTLS on 25/587
         base_config(),
         nntp_queue,
         None,
@@ -398,6 +400,7 @@ async fn plain_tcp_to_smtps_port_receives_no_smtp_greeting() {
         listener_25,
         listener_587,
         Some((smtps_listener, tls_acceptor)),
+        None, // starttls_acceptor: use SMTPS, not STARTTLS on 25/587
         base_config(),
         nntp_queue,
         None,
@@ -475,6 +478,7 @@ async fn smtps_session_responds_to_ehlo() {
         listener_25,
         listener_587,
         Some((smtps_listener, tls_acceptor)),
+        None, // starttls_acceptor: use SMTPS, not STARTTLS on 25/587
         base_config(),
         nntp_queue,
         None,
@@ -549,6 +553,7 @@ async fn port_25_unaffected_by_smtps_configuration() {
         listener_25,
         listener_587,
         Some((smtps_listener, tls_acceptor)),
+        None, // starttls_acceptor: use SMTPS, not STARTTLS on 25/587
         base_config(),
         nntp_queue,
         None,
