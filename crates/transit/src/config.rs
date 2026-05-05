@@ -1105,6 +1105,25 @@ addr = ""
             })?;
         }
 
+        // DECISION (rbe3.29): staging WAL required for non-loopback deployments
+        //
+        // Without [staging], the daemon sends 239 (transfer ok) to the peer
+        // before the article is durably written to disk.  If the process dies
+        // after 239 but before the block_put succeeds, the peer believes we
+        // have the article and will not re-offer it — the article is silently
+        // lost.  The staging WAL ensures 239/235 is only sent after the article
+        // is persisted to disk and committed to SQLite, making the acceptance
+        // acknowledgement durable.  Loopback-only (dev/test) deployments are
+        // exempted because article loss from a local dev crash is acceptable.
+        if self.staging.is_none() && !is_loopback_addr(&self.listen.addr) {
+            return Err(ConfigError::Validation(
+                "[staging] must be configured when listening on a non-loopback address. \
+                 The staging WAL ensures 239/235 is only sent after the article is durably \
+                 written to disk. Run with a loopback address for dev mode without staging."
+                    .into(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -1230,6 +1249,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
 
     #[test]
@@ -1290,6 +1312,9 @@ rules = []
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("should fail");
@@ -1320,6 +1345,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         Config::from_file(f.path())
@@ -1347,6 +1375,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("should fail");
@@ -1447,6 +1478,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("should parse");
@@ -1490,6 +1524,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("should fail");
@@ -1526,6 +1563,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("short fingerprint must fail");
@@ -1568,6 +1608,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("uppercase fingerprint must fail");
@@ -1610,6 +1653,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         Config::from_file(f.path()).expect("valid 32-byte lowercase fingerprint must pass");
@@ -1637,6 +1683,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "not-a-cron"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("invalid cron must fail validation");
@@ -1674,6 +1723,9 @@ rules = ["pin-all"]
 [gc]
 schedule = ""
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("empty schedule must fail validation");
@@ -1705,6 +1757,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         Config::from_file(f.path()).expect("6-field cron schedule must pass validation");
@@ -1737,6 +1792,9 @@ groups = ["comp.*"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("should parse");
@@ -1778,6 +1836,9 @@ api_key = "token"
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("HTTP endpoint should fail validation");
@@ -1818,6 +1879,9 @@ api_key = "token-2"
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err =
@@ -1855,6 +1919,9 @@ connect_timeout_secs = 0
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("zero timeout should fail validation");
@@ -1889,6 +1956,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("backend.kubo config must parse");
@@ -1922,6 +1992,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("missing backend.kubo must fail");
@@ -1956,6 +2029,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("backend.lmdb config must parse");
@@ -1990,6 +2066,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("missing backend.lmdb must fail");
@@ -2021,6 +2100,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -2057,6 +2139,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("s3 backend config must parse");
@@ -2094,6 +2179,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err =
@@ -2130,6 +2218,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("empty bucket must fail validation");
@@ -2165,6 +2256,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("azure backend config must parse");
@@ -2202,6 +2296,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err =
@@ -2238,6 +2335,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("empty account must fail validation");
@@ -2272,6 +2372,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("gcs backend config must parse");
@@ -2305,6 +2408,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err =
@@ -2343,6 +2449,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err =
@@ -2380,6 +2489,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err =
@@ -2415,6 +2527,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("webdav backend config must parse");
@@ -2448,6 +2563,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -2483,6 +2601,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("empty url must fail validation");
@@ -2517,6 +2638,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -2553,6 +2677,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("webdav with allow_http must parse");
@@ -2585,6 +2712,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("rocksdb backend config must parse");
@@ -2618,6 +2748,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -2653,6 +2786,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("empty path must fail validation");
@@ -2689,6 +2825,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("valid rados config must parse");
@@ -2722,6 +2861,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("missing rados section must fail");
@@ -2758,6 +2900,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("empty pool must fail validation");
@@ -2789,6 +2934,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("trailing slash must fail validation");
@@ -2824,6 +2972,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -2859,6 +3010,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("filesystem backend config must parse");
@@ -2892,6 +3046,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -2927,6 +3084,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("sqlite backend config must parse");
@@ -2960,6 +3120,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -2996,6 +3159,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("map_size_gb = 0 must fail");
@@ -3027,6 +3193,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         Config::from_file(f.path()).expect("wildmat patterns must be valid");
@@ -3054,6 +3223,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("all-negation filter must fail");
@@ -3088,6 +3260,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("missing ipfs and backend must fail");
@@ -3200,6 +3375,9 @@ api_key = "secretx://env/PINATA_TOKEN"
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let cfg = Config::from_file(f.path()).expect("empty groups must be valid (accept all)");
@@ -3239,6 +3417,9 @@ groups = ["comp.@invalid"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -3277,6 +3458,9 @@ groups = ["!comp.*", "!alt.*"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -3336,6 +3520,9 @@ max_age_days = 30
 
 [peering]
 trusted_peers = ["ed25519:{hex}"]
+
+[staging]
+path = "/tmp/test-staging"
 "#
         );
         let f = write_toml(&toml);
@@ -3367,6 +3554,9 @@ max_age_days = 30
 
 [peering]
 trusted_peers = ["rsa:deadbeef"]
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err =
@@ -3402,6 +3592,9 @@ max_age_days = 30
 
 [peering]
 trusted_peers = ["ed25519:notvalidhex!!"]
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path()).expect_err("invalid hex must fail config validation");
@@ -3438,6 +3631,9 @@ rules = ["pin-all"]
 [gc]
 schedule = "0 3 * * *"
 max_age_days = 30
+
+[staging]
+path = "/tmp/test-staging"
 "#;
         let f = write_toml(toml);
         let err = Config::from_file(f.path())
@@ -3541,6 +3737,8 @@ max_age_days = 30
 [backend]
 type = "web_dav"
 
+[staging]
+path = "/tmp/test-staging"
 "#;
 
     /// allow_http = true + password on a non-loopback URL is a fatal validation error.
@@ -3624,5 +3822,130 @@ allow_http = true
         let f = write_toml(&toml);
         Config::from_file(f.path())
             .expect("allow_http + credentials on localhost must be accepted");
+    }
+
+    // ── Staging WAL requirement tests ─────────────────────────────────────────
+
+    /// Non-loopback listen address without [staging] must fail validation.
+    #[test]
+    fn staging_required_for_nonloopback_listen_addr() {
+        let toml = r#"
+[listen]
+addr = "0.0.0.0:119"
+
+[peers]
+addresses = []
+
+[groups]
+names = []
+
+[ipfs]
+api_url = "http://127.0.0.1:5001"
+
+[pinning]
+rules = ["pin-all"]
+
+[gc]
+schedule = "0 3 * * *"
+max_age_days = 30
+"#;
+        let f = write_toml(toml);
+        let err = Config::from_file(f.path())
+            .expect_err("non-loopback without [staging] must fail validation");
+        assert!(
+            matches!(err, ConfigError::Validation(_)),
+            "expected Validation error, got {err:?}"
+        );
+        if let ConfigError::Validation(msg) = err {
+            assert!(
+                msg.contains("[staging]"),
+                "error must mention [staging], got: {msg}"
+            );
+        }
+    }
+
+    /// Non-loopback listen address with [staging] configured must pass validation.
+    #[test]
+    fn staging_present_nonloopback_passes_validation() {
+        let toml = r#"
+[listen]
+addr = "0.0.0.0:119"
+
+[peers]
+addresses = []
+
+[groups]
+names = []
+
+[ipfs]
+api_url = "http://127.0.0.1:5001"
+
+[pinning]
+rules = ["pin-all"]
+
+[gc]
+schedule = "0 3 * * *"
+max_age_days = 30
+
+[staging]
+path = "/srv/stoa/transit/staging"
+"#;
+        let f = write_toml(toml);
+        Config::from_file(f.path()).expect("non-loopback with [staging] must pass validation");
+    }
+
+    /// Loopback listen address without [staging] must pass validation (dev mode).
+    #[test]
+    fn staging_not_required_for_loopback_listen_addr() {
+        let toml = r#"
+[listen]
+addr = "127.0.0.1:119"
+
+[peers]
+addresses = []
+
+[groups]
+names = []
+
+[ipfs]
+api_url = "http://127.0.0.1:5001"
+
+[pinning]
+rules = ["pin-all"]
+
+[gc]
+schedule = "0 3 * * *"
+max_age_days = 30
+"#;
+        let f = write_toml(toml);
+        Config::from_file(f.path())
+            .expect("loopback without [staging] must pass validation (dev mode)");
+    }
+
+    /// IPv6 loopback without [staging] must pass validation.
+    #[test]
+    fn staging_not_required_for_ipv6_loopback_listen_addr() {
+        let toml = r#"
+[listen]
+addr = "[::1]:119"
+
+[peers]
+addresses = []
+
+[groups]
+names = []
+
+[ipfs]
+api_url = "http://127.0.0.1:5001"
+
+[pinning]
+rules = ["pin-all"]
+
+[gc]
+schedule = "0 3 * * *"
+max_age_days = 30
+"#;
+        let f = write_toml(toml);
+        Config::from_file(f.path()).expect("IPv6 loopback without [staging] must pass validation");
     }
 }

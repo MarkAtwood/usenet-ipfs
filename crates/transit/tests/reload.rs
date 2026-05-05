@@ -55,6 +55,9 @@ max_age_days = 30
 [peering]
 trusted_peers = [{peers_inline}]
 
+[staging]
+path = "/tmp/stoa-test-staging"
+
 [log]
 level = "{log_level}"
 "#
