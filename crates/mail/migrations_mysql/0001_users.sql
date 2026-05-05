@@ -1,0 +1,6 @@
+-- MySQL/MariaDB dialect. PG equivalent: id BIGSERIAL PRIMARY KEY.
+CREATE TABLE IF NOT EXISTS users (
+    id            BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    username      VARCHAR(255) UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

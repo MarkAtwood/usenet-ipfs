@@ -1,4 +1,6 @@
 -- Migration 0012: replace mailbox_messages (user-partitioned) with messages (shared).
+-- SQLite dialect: uses CREATE/INSERT/DROP/RENAME because SQLite <3.35 does not
+-- support DROP COLUMN. PG equivalent uses direct DDL (see migrations_pg/).
 -- No FK on mailbox_id: migration 0011 discards old mailbox rows (mailbox_id scheme
 -- changed from SHA-256(user_id||role) to SHA-256(role)), so existing mailbox_messages
 -- rows cannot satisfy the FK. Messages are orphaned but retained; provision_mailboxes()

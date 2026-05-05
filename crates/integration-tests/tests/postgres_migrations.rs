@@ -1,8 +1,8 @@
 //! PostgreSQL migration integration tests (usenet-ipfs-ky62.6).
 //!
-//! Verifies that all four migration sets run successfully against a real
-//! PostgreSQL database, and that basic INSERT/SELECT/DELETE round-trips work
-//! for the core schema types used by each crate.
+//! Verifies that all migration sets run successfully against a real PostgreSQL
+//! database, and that basic INSERT/SELECT/DELETE round-trips work for the core
+//! schema types used by each crate.
 //!
 //! Requires a running PostgreSQL instance.  Skip if `STOA_TEST_PG_URL` is
 //! not set.  Set it to e.g.:
@@ -26,7 +26,7 @@ fn pg_url() -> Option<String> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// All four migration sets complete without error on PostgreSQL.
+/// All migration sets complete without error on PostgreSQL.
 #[tokio::test]
 async fn all_migrations_run_on_postgres() {
     let base = match pg_url() {
@@ -54,6 +54,10 @@ async fn all_migrations_run_on_postgres() {
     stoa_verify::run_migrations(&base)
         .await
         .expect("stoa_verify migrations must succeed on PostgreSQL");
+
+    stoa_mail::migrations::run_migrations(&base)
+        .await
+        .expect("stoa_mail migrations must succeed on PostgreSQL");
 }
 
 /// Running migrations twice is idempotent (ON CONFLICT / IF NOT EXISTS).
@@ -192,4 +196,95 @@ async fn transit_articles_roundtrip() {
             .expect("SELECT after DELETE must succeed");
 
     assert!(after_delete.is_none(), "row must be absent after DELETE");
+}
+
+/// stoa-mail migrations run on PostgreSQL and basic schema round-trips work.
+///
+/// Covers: users, subscriptions, user_flags, bearer_tokens, and messages tables.
+/// Independent oracle: PostgreSQL server error reporting.
+#[tokio::test]
+async fn mail_migrations_and_roundtrip() {
+    let base = match pg_url() {
+        Some(u) => u,
+        None => return,
+    };
+
+    sqlx::any::install_default_drivers();
+    stoa_mail::migrations::run_migrations(&base)
+        .await
+        .expect("stoa_mail migrations must succeed on PostgreSQL");
+
+    let pool = stoa_core::db_pool::try_open_any_pool(&base, 2)
+        .await
+        .expect("pool");
+
+    // Insert a user (singleton model; user_id=1 expected by all stores).
+    sqlx::query(
+        "INSERT INTO users (id, username, password_hash) \
+         VALUES (1, 'alice', 'x') \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("INSERT users must succeed on PostgreSQL");
+
+    // Subscribe the user to a group and verify.
+    sqlx::query(
+        "INSERT INTO subscriptions (user_id, group_name, subscribed_at) \
+         VALUES (1, 'comp.lang.rust', 0) \
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("INSERT subscriptions must succeed");
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscriptions WHERE user_id = 1")
+        .fetch_one(&pool)
+        .await
+        .expect("COUNT subscriptions must succeed");
+    assert!(count >= 1, "subscription must be present");
+
+    // Insert a bearer token and verify lookup.
+    sqlx::query(
+        "INSERT INTO bearer_tokens \
+         (id, token_hash, username, label, created_at, expires_at) \
+         VALUES ('tok1', '\\xdeadbeef', 'alice', NULL, 0, NULL) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("INSERT bearer_tokens must succeed");
+
+    let found: Option<String> =
+        sqlx::query_scalar("SELECT username FROM bearer_tokens WHERE id = 'tok1'")
+            .fetch_optional(&pool)
+            .await
+            .expect("SELECT bearer_tokens must succeed");
+    assert_eq!(found.as_deref(), Some("alice"));
+
+    // Provision the inbox special mailbox and insert a message.
+    sqlx::query(
+        "INSERT INTO mailboxes (mailbox_id, role, name, sort_order) \
+         VALUES ('inbox_id', 'inbox', 'INBOX', 1) \
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("INSERT mailboxes must succeed");
+
+    sqlx::query(
+        "INSERT INTO messages \
+         (mailbox_id, envelope_from, envelope_to, raw_message) \
+         VALUES ('inbox_id', 'sender@example.com', 'alice@example.com', '\\x48656c6c6f')",
+    )
+    .execute(&pool)
+    .await
+    .expect("INSERT messages must succeed");
+
+    let msg_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE mailbox_id = 'inbox_id'")
+            .fetch_one(&pool)
+            .await
+            .expect("COUNT messages must succeed");
+    assert!(msg_count >= 1, "message must be present");
 }

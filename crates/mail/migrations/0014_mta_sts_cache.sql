@@ -1,3 +1,5 @@
+-- SQLite dialect. PG equivalent uses TIMESTAMPTZ for fetched_at and expires_at
+-- instead of TEXT. The table is dropped in 0015 so this difference is moot.
 CREATE TABLE IF NOT EXISTS mta_sts_cache (
     domain       TEXT NOT NULL PRIMARY KEY,
     policy_id    TEXT NOT NULL,

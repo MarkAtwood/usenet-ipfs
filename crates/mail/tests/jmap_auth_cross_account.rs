@@ -120,6 +120,8 @@ async fn spawn_dev_server(tag: &str) -> (String, Vec<tempfile::TempPath>) {
     let (core_pool, core_tmp) = make_core_pool(tag).await;
 
     let ipfs = Arc::new(MemIpfs::new());
+    let article_numbers = Arc::new(ArticleNumberStore::new(reader_pool.clone()));
+    let overview_store = Arc::new(OverviewStore::new(reader_pool));
     let mail_store = new_sqlx_mail_store(Arc::clone(&mail_pool_arc));
     mail_store
         .provision_mailboxes()
@@ -134,8 +136,8 @@ async fn spawn_dev_server(tag: &str) -> (String, Vec<tempfile::TempPath>) {
     let jmap_stores = Arc::new(JmapStores {
         ipfs: ipfs as Arc<dyn IpfsBlockStore>,
         msgid_map: Arc::new(stoa_core::msgid_map::MsgIdMap::new(core_pool)),
-        article_numbers: Arc::clone(&article_numbers),
-        overview_store: Arc::clone(&overview_store),
+        article_numbers,
+        overview_store,
         search_index: None,
         outbound_mailer: None,
         mail_store,

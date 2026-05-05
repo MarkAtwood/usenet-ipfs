@@ -1,3 +1,4 @@
+-- SQLite dialect. PG equivalents: user_id BIGINT, article_cid BYTEA.
 CREATE TABLE IF NOT EXISTS user_flags (
     user_id INTEGER NOT NULL,
     article_cid BLOB NOT NULL,

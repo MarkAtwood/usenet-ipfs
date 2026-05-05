@@ -1,4 +1,7 @@
 -- Migration 0013 (SQLite): add user_id to state_version and jmap_change_log.
+-- SQLite dialect: uses CREATE/INSERT/DROP/RENAME to add user_id and change PRIMARY KEY.
+-- PG equivalent uses ALTER TABLE ADD COLUMN + DROP CONSTRAINT + ADD PRIMARY KEY
+-- (see migrations_pg/0013_user_scope_state.sql).
 --
 -- Existing rows (all owned by user_id=1 in single-user v1) are preserved.
 -- ON CONFLICT constraints are updated to include user_id so that per-user
