@@ -349,6 +349,82 @@ This requires the `aws-config` crate chain and will increase binary size.  Only 
 
 ---
 
+## Staging WAL (`crates/transit/`)
+
+### Why staging is required for non-loopback deployments
+
+Without `[staging]`, the transit daemon sends a `239 Transfer OK` to the
+sending peer before the article is durably written to disk.  If the process
+dies after the `239` but before the block write completes, the peer believes
+we have accepted the article and will not re-offer it — the article is
+**silently and permanently lost**.
+
+The staging WAL fixes this: the article is written to a local file and
+committed to SQLite *before* the `239` is sent.  On restart, any unprocessed
+staging rows are replayed automatically.
+
+The daemon enforces this at startup: if `listen.addr` binds a non-loopback
+address and `[staging]` is absent, the daemon refuses to start with a clear
+error message.  Loopback-only (dev/test) deployments are exempted.
+
+### Configuration
+
+Add a `[staging]` section to `transit.toml`:
+
+```toml
+[staging]
+path = "/srv/stoa/transit/staging"
+max_bytes = 5368709120   # 5 GiB
+max_entries = 500000
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | (required) | Directory for staging files. Created at startup if absent. |
+| `max_bytes` | `5368709120` (5 GiB) | Maximum total staging directory size. When exceeded, the incoming article is rejected with a transient `436`/`439` so the peer retries later. |
+| `max_entries` | `500000` | Maximum number of staged articles. |
+
+### Sizing guidance
+
+- `max_bytes`: set to roughly 2× your expected peak article inflow per restart
+  window (how long it takes ops to notice and restart a crashed daemon).
+  5 GiB is conservative for most deployments.
+- `max_entries`: 500 000 covers typical Usenet traffic bursts.  Lower it if
+  your disk is small or you want earlier back-pressure.
+
+### Filesystem requirements
+
+- The `path` directory must be on a filesystem with **durable writes** (EXT4,
+  XFS, ZFS with sync writes, or equivalent).  Do not point `path` at a `tmpfs`
+  or RAM disk — this negates the durability guarantee.
+- On EC2: use an EBS volume (not the instance store, which does not survive
+  instance termination).  A separate EBS volume from the block store is fine.
+
+### Example EC2 layout
+
+```
+/srv/stoa/transit/staging   →  EBS gp3 volume, mounted at /srv/stoa
+/srv/stoa/transit/data      →  same volume, block store root
+```
+
+```toml
+[staging]
+path = "/srv/stoa/transit/staging"
+max_bytes = 5368709120   # 5 GiB
+max_entries = 500000
+```
+
+### Monitoring
+
+The staging drain emits structured tracing events.  Watch for:
+
+- `staging drain requeued` — the IPFS pipeline is slow; staging backlog is
+  growing.  Check IPFS node health and increase `max_bytes` if needed.
+- Daemon startup log line `staging_rows_replayed=N` with N > 0 — indicates
+  an unclean shutdown; N articles were recovered from the WAL.
+
+---
+
 ## Aurora Serverless v2 Deployment (usenet-ipfs-ky62.7)
 
 This section documents running `stoa-transit` and `stoa-reader` with Amazon
