@@ -2210,6 +2210,7 @@ mod tests {
     async fn test_ehlo_includes_starttls_when_tls_acceptor_present() {
         use rcgen::generate_simple_self_signed;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let config = test_config();
         let cert_key = generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2269,6 +2270,7 @@ mod tests {
     async fn test_auth_before_starttls_returns_530() {
         use rcgen::generate_simple_self_signed;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let config = test_config();
         let cert_key = generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
         let dir = tempfile::tempdir().expect("tempdir");
