@@ -27,7 +27,6 @@ use crate::metrics::{
 use crate::queue::{header_section_end, NntpQueue};
 use crate::{routing, store};
 
-
 /// Combined read/write trait for SMTP stream objects.
 pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
@@ -281,8 +280,14 @@ pub async fn run_session(
                     continue;
                 }
                 // RFC 3207: advertise STARTTLS when tls_acceptor is Some.
-                let starttls_line = if !is_tls && tls_acceptor.is_some() { "250-STARTTLS\r\n" } else { "" };
-                let auth_line = if (is_tls || is_submission || tls_acceptor.is_some()) && !credential_store.is_empty() {
+                let starttls_line = if !is_tls && tls_acceptor.is_some() {
+                    "250-STARTTLS\r\n"
+                } else {
+                    ""
+                };
+                let auth_line = if (is_tls || is_submission || tls_acceptor.is_some())
+                    && !credential_store.is_empty()
+                {
                     "250-AUTH PLAIN\r\n"
                 } else {
                     ""
@@ -323,7 +328,9 @@ pub async fn run_session(
             "AUTH" => {
                 if !is_tls {
                     if tls_acceptor.is_some() {
-                        let _ = write_half.write_all(b"530 5.7.0 Must issue a STARTTLS command first\r\n").await;
+                        let _ = write_half
+                            .write_all(b"530 5.7.0 Must issue a STARTTLS command first\r\n")
+                            .await;
                     } else {
                         let _ = write_half.write_all(b"534 5.7.9 Encryption required for requested authentication mechanism\r\n").await;
                     }
@@ -816,24 +823,57 @@ pub async fn run_session(
 
             "STARTTLS" => {
                 if is_tls {
-                    if write_half.write_all(b"503 5.5.1 STARTTLS already active\r\n").await.is_err() { break; }
+                    if write_half
+                        .write_all(b"503 5.5.1 STARTTLS already active\r\n")
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                     continue;
                 }
                 let Some(ref acceptor) = tls_acceptor else {
-                    if write_half.write_all(b"454 TLS not available\r\n").await.is_err() { break; }
+                    if write_half
+                        .write_all(b"454 TLS not available\r\n")
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                     continue;
                 };
-                if write_half.write_all(b"220 Ready to start TLS\r\n").await.is_err() { break; }
+                if write_half
+                    .write_all(b"220 Ready to start TLS\r\n")
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
                 let plain_stream = reader.into_inner().unsplit(write_half);
                 let tls_stream = match acceptor.accept(plain_stream).await {
                     Ok(s) => s,
-                    Err(e) => { info!(peer = %peer_addr, "STARTTLS handshake failed: {e}"); return; }
+                    Err(e) => {
+                        info!(peer = %peer_addr, "STARTTLS handshake failed: {e}");
+                        return;
+                    }
                 };
                 Box::pin(run_session(
-                    Box::new(tls_stream), true, is_submission, peer_addr,
-                    config, credential_store, nntp_queue, auth, dns_cache,
-                    pool, mail_pool, sieve_cache, inbox_mailbox_id, None,
-                )).await;
+                    Box::new(tls_stream),
+                    true,
+                    is_submission,
+                    peer_addr,
+                    config,
+                    credential_store,
+                    nntp_queue,
+                    auth,
+                    dns_cache,
+                    pool,
+                    mail_pool,
+                    sieve_cache,
+                    inbox_mailbox_id,
+                    None,
+                ))
+                .await;
                 return;
             }
 
@@ -2165,7 +2205,6 @@ mod tests {
         );
     }
 
-
     // STARTTLS must appear in EHLO when tls_acceptor is Some. Oracle: RFC 3207 §3.
     #[tokio::test]
     async fn test_ehlo_includes_starttls_when_tls_acceptor_present() {
@@ -2178,26 +2217,51 @@ mod tests {
         let key_path = dir.path().join("test.key");
         std::fs::write(&cert_path, cert_key.cert.pem().as_bytes()).expect("write cert");
         std::fs::write(&key_path, cert_key.key_pair.serialize_pem().as_bytes()).expect("write key");
-        let acceptor = Arc::new(crate::tls::build_tls_acceptor(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).expect("build acceptor"));
+        let acceptor = Arc::new(
+            crate::tls::build_tls_acceptor(cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+                .expect("build acceptor"),
+        );
         let queue_dir = tempfile::tempdir().expect("tempdir");
         let nntp_queue = Arc::new(NntpQueue::new(queue_dir.path(), None).expect("NntpQueue"));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let config2 = config.clone();
         let queue2 = Arc::clone(&nntp_queue);
         let acceptor2 = Some(Arc::clone(&acceptor));
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.expect("accept");
-            run_session(Box::new(stream), false, false, peer.to_string(), config2,
-                Arc::new(CredentialStore::empty()), queue2, None,
-                Arc::new(crate::dns_cache::DnsCache::new()), None, None, None, None, acceptor2).await;
+            run_session(
+                Box::new(stream),
+                false,
+                false,
+                peer.to_string(),
+                config2,
+                Arc::new(CredentialStore::empty()),
+                queue2,
+                None,
+                Arc::new(crate::dns_cache::DnsCache::new()),
+                None,
+                None,
+                None,
+                None,
+                acceptor2,
+            )
+            .await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        client.write_all(b"EHLO client.example.com\r\nQUIT\r\n").await.expect("write");
+        client
+            .write_all(b"EHLO client.example.com\r\nQUIT\r\n")
+            .await
+            .expect("write");
         client.shutdown().await.expect("shutdown");
         let mut response = String::new();
         client.read_to_string(&mut response).await.expect("read");
-        assert!(response.contains("STARTTLS"), "STARTTLS must appear in EHLO when tls_acceptor is Some: {response}");
+        assert!(
+            response.contains("STARTTLS"),
+            "STARTTLS must appear in EHLO when tls_acceptor is Some: {response}"
+        );
     }
 
     // AUTH before STARTTLS returns 530. Oracle: RFC 4954 §4.
@@ -2212,28 +2276,59 @@ mod tests {
         let key_path = dir.path().join("test.key");
         std::fs::write(&cert_path, cert_key.cert.pem().as_bytes()).expect("write cert");
         std::fs::write(&key_path, cert_key.key_pair.serialize_pem().as_bytes()).expect("write key");
-        let acceptor = Arc::new(crate::tls::build_tls_acceptor(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).expect("build acceptor"));
+        let acceptor = Arc::new(
+            crate::tls::build_tls_acceptor(cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+                .expect("build acceptor"),
+        );
         let queue_dir = tempfile::tempdir().expect("tempdir");
         let nntp_queue = Arc::new(NntpQueue::new(queue_dir.path(), None).expect("NntpQueue"));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let config2 = config.clone();
         let queue2 = Arc::clone(&nntp_queue);
         let acceptor2 = Some(Arc::clone(&acceptor));
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.expect("accept");
-            run_session(Box::new(stream), false, false, peer.to_string(), config2,
-                Arc::new(CredentialStore::empty()), queue2, None,
-                Arc::new(crate::dns_cache::DnsCache::new()), None, None, None, None, acceptor2).await;
+            run_session(
+                Box::new(stream),
+                false,
+                false,
+                peer.to_string(),
+                config2,
+                Arc::new(CredentialStore::empty()),
+                queue2,
+                None,
+                Arc::new(crate::dns_cache::DnsCache::new()),
+                None,
+                None,
+                None,
+                None,
+                acceptor2,
+            )
+            .await;
         });
         let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        client.write_all(b"EHLO client.example.com\r\nAUTH PLAIN\r\n").await.expect("write");
+        client
+            .write_all(b"EHLO client.example.com\r\nAUTH PLAIN\r\n")
+            .await
+            .expect("write");
         client.shutdown().await.expect("shutdown");
         let mut response = String::new();
         client.read_to_string(&mut response).await.expect("read");
-        assert!(response.contains("530"), "AUTH before STARTTLS must return 530, got: {response}");
-        assert!(response.contains("5.7.0"), "530 must carry 5.7.0, got: {response}");
-        assert!(!response.contains("334"), "No AUTH challenge before STARTTLS: {response}");
+        assert!(
+            response.contains("530"),
+            "AUTH before STARTTLS must return 530, got: {response}"
+        );
+        assert!(
+            response.contains("5.7.0"),
+            "530 must carry 5.7.0, got: {response}"
+        );
+        assert!(
+            !response.contains("334"),
+            "No AUTH challenge before STARTTLS: {response}"
+        );
     }
 
     // ── EHLO/HELO injection guard ─────────────────────────────────────────────
