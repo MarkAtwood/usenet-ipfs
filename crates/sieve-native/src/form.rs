@@ -135,7 +135,61 @@ fn read_stmt(tokens: &[Token], start: usize) -> Result<(Stmt, usize), ParseError
                 let (block, new_pos) = read_block(tokens, pos)?;
                 pos = new_pos;
                 stmt.push(Form::Block(block));
-                // A block terminates the statement without requiring a semicolon.
+                // After a block, absorb any trailing `elsif`/`else` clauses
+                // into the same statement so the evaluator sees the full
+                // if/elsif/else chain as one unit (RFC 5228 §3.1).
+                loop {
+                    match tokens.get(pos) {
+                        Some(Token::Word(w)) if w == "elsif" || w == "else" => {
+                            // Pull the keyword and everything up to (and including)
+                            // the next Block into the same statement.
+                            stmt.push(Form::Word(w.clone()));
+                            pos += 1;
+                            // Consume any forms between the keyword and the next block.
+                            while pos < tokens.len() {
+                                match &tokens[pos] {
+                                    Token::LBrace => {
+                                        pos += 1;
+                                        let (inner_block, new_pos2) = read_block(tokens, pos)?;
+                                        pos = new_pos2;
+                                        stmt.push(Form::Block(inner_block));
+                                        break; // inner block consumed; check for another elsif/else
+                                    }
+                                    Token::Word(s) => {
+                                        stmt.push(Form::Word(s.clone()));
+                                        pos += 1;
+                                    }
+                                    Token::Tag(s) => {
+                                        stmt.push(Form::Tag(s.clone()));
+                                        pos += 1;
+                                    }
+                                    Token::StringLit(s) => {
+                                        stmt.push(Form::Str(s.clone()));
+                                        pos += 1;
+                                    }
+                                    Token::Number(n) => {
+                                        stmt.push(Form::Num(*n));
+                                        pos += 1;
+                                    }
+                                    Token::LBracket => {
+                                        pos += 1;
+                                        let (list, new_pos2) = read_string_list(tokens, pos)?;
+                                        pos = new_pos2;
+                                        stmt.push(Form::StringList(list));
+                                    }
+                                    Token::LParen => {
+                                        pos += 1;
+                                        let (test_list, new_pos2) = read_test_list(tokens, pos)?;
+                                        pos = new_pos2;
+                                        stmt.push(Form::TestList(test_list));
+                                    }
+                                    _ => break,
+                                }
+                            }
+                        }
+                        _ => break, // no trailing clause; terminate the statement
+                    }
+                }
                 return Ok((stmt, pos));
             }
 

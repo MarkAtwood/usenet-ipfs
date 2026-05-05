@@ -622,7 +622,11 @@ pub async fn run_session<S>(
                 // is configured.  On DMARC reject the session sends 550 and
                 // resets to Greeted (the TCP connection stays open per RFC 5321
                 // §6.1 — a 5xx on DATA is not a reason to terminate).
-                if let Some(ref authenticator) = auth {
+                //
+                // The SieveEnv is populated by verify_inbound when auth runs;
+                // it remains empty when no authenticator is configured so Sieve
+                // scripts using environment tests degrade gracefully.
+                let sieve_env = if let Some(ref authenticator) = auth {
                     let result = verify_inbound(
                         authenticator,
                         &dns_cache,
@@ -661,7 +665,11 @@ pub async fn run_session<S>(
                     new_bytes.extend_from_slice(&header_bytes);
                     new_bytes.extend_from_slice(&raw_bytes);
                     raw_bytes = new_bytes;
-                }
+
+                    result.sieve_env
+                } else {
+                    stoa_sieve_native::SieveEnv::new()
+                };
 
                 // ─── Received: header (RFC 5321 §4.4 / RFC 3848 §2) ─────────
                 // Every MTA that accepts a message MUST prepend a Received:
@@ -723,6 +731,7 @@ pub async fn run_session<S>(
                     sieve_cache.as_ref(),
                     &nntp_queue,
                     &peer_addr,
+                    &sieve_env,
                 )
                 .await
                 {
@@ -938,6 +947,7 @@ async fn sieve_delivery(
     sieve_cache: Option<&SieveCache>,
     nntp_queue: &NntpQueue,
     peer_addr: &str,
+    env: &stoa_sieve_native::SieveEnv,
 ) -> SieveOutcome {
     // Use the first recipient address for Sieve envelope matching.
     // In a single-user system all recipients share the same global policy.
@@ -948,7 +958,7 @@ async fn sieve_delivery(
         let sieve_timeout = tokio::time::Duration::from_millis(config.limits.sieve_eval_timeout_ms);
         match tokio::time::timeout(
             sieve_timeout,
-            sieve_global(db_pool, raw_bytes, from, envelope_to, sieve_cache),
+            sieve_global(db_pool, raw_bytes, from, envelope_to, sieve_cache, env),
         )
         .await
         {
@@ -1148,6 +1158,7 @@ async fn sieve_global(
     envelope_from: &str,
     envelope_to: &str,
     cache: Option<&SieveCache>,
+    env: &stoa_sieve_native::SieveEnv,
 ) -> Vec<stoa_sieve_native::SieveAction> {
     // Check cache before hitting the database.
     if let Some(cache) = cache {
@@ -1155,7 +1166,13 @@ async fn sieve_global(
         if let Some(compiled) = lock.get(crate::config::GLOBAL_SCRIPT_KEY) {
             let compiled = Arc::clone(compiled);
             drop(lock);
-            return stoa_sieve_native::evaluate(&compiled, raw_message, envelope_from, envelope_to);
+            return stoa_sieve_native::evaluate(
+                &compiled,
+                raw_message,
+                envelope_from,
+                envelope_to,
+                env,
+            );
         }
     }
 
@@ -1170,7 +1187,7 @@ async fn sieve_global(
                         Arc::clone(&compiled),
                     );
                 }
-                stoa_sieve_native::evaluate(&compiled, raw_message, envelope_from, envelope_to)
+                stoa_sieve_native::evaluate(&compiled, raw_message, envelope_from, envelope_to, env)
             }
             Err(e) => {
                 tracing::error!(
@@ -2293,6 +2310,7 @@ mod tests {
             "a@example.com",
             "b@example.com",
             Some(&cache),
+            &stoa_sieve_native::SieveEnv::new(),
         )
         .await;
 
@@ -2326,6 +2344,7 @@ mod tests {
             "a@example.com",
             "b@example.com",
             Some(&cache),
+            &stoa_sieve_native::SieveEnv::new(),
         )
         .await;
         assert!(
@@ -2345,6 +2364,7 @@ mod tests {
             "a@example.com",
             "b@example.com",
             Some(&cache),
+            &stoa_sieve_native::SieveEnv::new(),
         )
         .await;
         assert!(
@@ -2364,6 +2384,7 @@ mod tests {
             "a@example.com",
             "b@example.com",
             None,
+            &stoa_sieve_native::SieveEnv::new(),
         )
         .await;
         assert_eq!(actions, vec![stoa_sieve_native::SieveAction::Keep]);

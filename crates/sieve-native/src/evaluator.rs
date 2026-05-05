@@ -33,7 +33,7 @@
 
 use crate::form::{Form, Script, Stmt};
 use crate::message;
-use crate::SieveAction;
+use crate::{SieveAction, SieveEnv};
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -75,6 +75,15 @@ pub struct Ctx<'a> {
     /// are case-insensitive; storage uses lowercased keys throughout (see
     /// `expand_vars`).
     variables_enabled: bool,
+    /// Whether `require ["environment"]` was declared (RFC 5183).
+    ///
+    /// The `environment` test is only available when this is `true`.  Scripts
+    /// that use `environment` without declaring it will fail at compile time
+    /// (unknown extension check in `compile()`), so this flag is a belt-and-
+    /// suspenders defence at eval time.
+    environment_enabled: bool,
+    /// Runtime environment values (RFC 5183).
+    env: &'a SieveEnv,
     /// The last explicit disposition action taken before a `stop` (RFC 5228 §4.1).
     ///
     /// RFC 5228 §4.1: `stop` halts script execution; any actions already taken
@@ -115,23 +124,28 @@ pub fn eval_script(
     raw_message: &[u8],
     envelope_from: &str,
     envelope_to: &str,
+    env: &SieveEnv,
 ) -> Vec<SieveAction> {
     let headers = message::extract_headers(raw_message);
 
     // Detect whether `require ["variables"]` appears in the script (RFC 5229 §3).
     // Variable substitution is only active when the script declares this extension.
-    let variables_enabled = script.iter().any(|stmt| {
-        if let [Form::Word(w), rest @ ..] = stmt.as_slice() {
-            if w == "require" {
-                return rest.iter().any(|f| match f {
-                    Form::Str(s) => s == "variables",
-                    Form::StringList(v) => v.iter().any(|s| s == "variables"),
-                    _ => false,
-                });
+    let has_require = |name: &str| {
+        script.iter().any(|stmt| {
+            if let [Form::Word(w), rest @ ..] = stmt.as_slice() {
+                if w == "require" {
+                    return rest.iter().any(|f| match f {
+                        Form::Str(s) => s == name,
+                        Form::StringList(v) => v.iter().any(|s| s == name),
+                        _ => false,
+                    });
+                }
             }
-        }
-        false
-    });
+            false
+        })
+    };
+    let variables_enabled = has_require("variables");
+    let environment_enabled = has_require("environment");
 
     let mut ctx = Ctx {
         headers,
@@ -140,6 +154,8 @@ pub fn eval_script(
         envelope_to,
         variables: HashMap::new(),
         variables_enabled,
+        environment_enabled,
+        env,
         last_action: None,
         nesting_depth: 0,
     };
@@ -325,6 +341,7 @@ fn eval_test(forms: &[Form], ctx: &mut Ctx<'_>) -> bool {
             "header" => eval_header_test(rest, ctx),
             "address" => eval_address_test(rest, ctx),
             "envelope" => eval_envelope_test(rest, ctx),
+            "environment" => eval_environment_test(rest, ctx),
             "exists" => eval_exists_test(rest, ctx),
             "size" => eval_size_test(rest, ctx.message_size),
             "allof" => eval_allof(rest, ctx),
@@ -790,6 +807,43 @@ fn eval_envelope_test(forms: &[Form], ctx: &mut Ctx<'_>) -> bool {
     } else {
         false
     }
+}
+
+/// RFC 5183 §4 environment test.
+///
+/// Grammar:
+/// ```text
+/// ENVIRONMENT-TEST = "environment" [MATCH-TYPE] [COMPARATOR]
+///                    <item: string-list> <key-list: string-list>
+/// ```
+///
+/// `item` is the environment name; `key-list` is the list of values to match.
+/// Uses the same match-type logic as header/envelope tests (is, contains,
+/// matches, regex).  Unknown environment names return the empty string
+/// (RFC 5183 §4).
+///
+/// If `environment_enabled` is false (script did not `require ["environment"]`)
+/// the test always returns `false` — compile-time validation already rejects
+/// such scripts, but this is an additional safety net.
+fn eval_environment_test(forms: &[Form], ctx: &mut Ctx<'_>) -> bool {
+    if !ctx.environment_enabled {
+        return false;
+    }
+    let refs: Vec<&Form> = forms.iter().collect();
+    let (mt, after_mt) = extract_match_type(&refs);
+    let (cmp, after_cmp) = extract_comparator(&after_mt);
+    let casemap = cmp == Comparator::AsciiCasemap;
+    let (item_names, keys) = collect_two_string_lists(&after_cmp);
+
+    for item in &item_names {
+        let value = ctx.env.get(item);
+        for key in &keys {
+            if apply_match(value, key, mt, casemap) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn eval_exists_test(forms: &[Form], ctx: &Ctx<'_>) -> bool {

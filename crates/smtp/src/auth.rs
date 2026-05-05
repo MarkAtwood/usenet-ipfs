@@ -3,7 +3,8 @@ use std::net::IpAddr;
 use mail_auth::{
     dmarc::{verify::DmarcParameters, Policy},
     spf::verify::SpfParameters,
-    AuthenticatedMessage, AuthenticationResults, DmarcResult, MessageAuthenticator, Parameters,
+    AuthenticatedMessage, AuthenticationResults, DkimResult, DmarcResult, MessageAuthenticator,
+    Parameters, SpfResult,
 };
 use tracing::debug;
 
@@ -18,6 +19,11 @@ pub struct InboundAuthResult {
     /// `true` when DMARC policy is `reject`, SPF failed, and DKIM failed.
     /// The session should return 550 and not enqueue the message.
     pub dmarc_reject: bool,
+    /// RFC 5183 Sieve environment values derived from authentication results.
+    ///
+    /// Populated before calling the Sieve evaluator so scripts can branch on
+    /// `vnd.stoa.dkim-result`, `vnd.stoa.spf-result`, etc.
+    pub sieve_env: stoa_sieve_native::SieveEnv,
 }
 
 /// Run the full inbound authentication pipeline:
@@ -42,6 +48,7 @@ pub async fn verify_inbound(
         return InboundAuthResult {
             header: format!("{hostname}; auth=permerror (message parse failed)"),
             dmarc_reject: false,
+            sieve_env: stoa_sieve_native::SieveEnv::new(),
         };
     };
 
@@ -125,6 +132,9 @@ pub async fn verify_inbound(
         .with_arc_result(&arc_result, client_ip)
         .to_string();
 
+    // Build RFC 5183 Sieve environment values from authentication results.
+    let sieve_env = build_sieve_env(hostname, &dkim_results, &spf_result, &dmarc_result);
+
     debug!(
         spf = ?spf_result.result(),
         dmarc_reject,
@@ -134,7 +144,105 @@ pub async fn verify_inbound(
     InboundAuthResult {
         header: auth_header,
         dmarc_reject,
+        sieve_env,
     }
+}
+
+/// Build a [`stoa_sieve_native::SieveEnv`] from inbound authentication results.
+///
+/// Exposes standard RFC 5183 values and `vnd.stoa.*` extension values.
+///
+/// | Name                    | Values                                  |
+/// |-------------------------|-----------------------------------------|
+/// | domain / host           | server hostname                         |
+/// | location                | `"MTA"`                                 |
+/// | phase                   | `"during"`                              |
+/// | vnd.stoa.dkim-result    | `pass` / `fail` / `none`                |
+/// | vnd.stoa.dkim-domain    | d= value or empty string                |
+/// | vnd.stoa.spf-result     | `pass` / `fail` / `softfail` / `neutral` / `none` |
+/// | vnd.stoa.dmarc-result   | `pass` / `fail` / `none`                |
+/// | vnd.stoa.dmarc-policy   | `reject` / `quarantine` / `none`        |
+fn build_sieve_env(
+    hostname: &str,
+    dkim_results: &[mail_auth::DkimOutput<'_>],
+    spf_result: &mail_auth::SpfOutput,
+    dmarc_result: &mail_auth::DmarcOutput,
+) -> stoa_sieve_native::SieveEnv {
+    let mut env = stoa_sieve_native::SieveEnv::new();
+
+    // Standard RFC 5183 values.
+    env.set("domain", hostname);
+    env.set("host", hostname);
+    env.set("location", "MTA");
+    env.set("phase", "during");
+
+    // vnd.stoa.dkim-result: use the first passing DKIM result; if none passed,
+    // use "fail" if any signature was present, or "none" if absent.
+    let first_pass = dkim_results
+        .iter()
+        .find(|r| *r.result() == DkimResult::Pass);
+    if let Some(pass) = first_pass {
+        env.set("vnd.stoa.dkim-result", "pass");
+        // d= value from the DKIM signature; empty string if absent.
+        let domain = pass.signature().map(|s| s.d.as_str()).unwrap_or("");
+        env.set("vnd.stoa.dkim-domain", domain);
+    } else if dkim_results.is_empty() {
+        env.set("vnd.stoa.dkim-result", "none");
+        env.set("vnd.stoa.dkim-domain", "");
+    } else {
+        env.set("vnd.stoa.dkim-result", "fail");
+        // Use the domain from the first failed signature if available.
+        let domain = dkim_results[0]
+            .signature()
+            .map(|s| s.d.as_str())
+            .unwrap_or("");
+        env.set("vnd.stoa.dkim-domain", domain);
+    }
+
+    // vnd.stoa.spf-result: map SpfResult variants to lowercase strings.
+    let spf_str = match spf_result.result() {
+        SpfResult::Pass => "pass",
+        SpfResult::Fail => "fail",
+        SpfResult::SoftFail => "softfail",
+        SpfResult::Neutral => "neutral",
+        SpfResult::None | SpfResult::TempError | SpfResult::PermError => "none",
+    };
+    env.set("vnd.stoa.spf-result", spf_str);
+
+    // vnd.stoa.dmarc-result and vnd.stoa.dmarc-policy.
+    let (dmarc_res_str, dmarc_policy_str) = match dmarc_result.dkim_result() {
+        DmarcResult::Pass => (
+            "pass",
+            match dmarc_result.policy() {
+                Policy::Reject => "reject",
+                Policy::Quarantine => "quarantine",
+                _ => "none",
+            },
+        ),
+        DmarcResult::None => ("none", "none"),
+        _ => match dmarc_result.spf_result() {
+            DmarcResult::Pass => (
+                "pass",
+                match dmarc_result.policy() {
+                    Policy::Reject => "reject",
+                    Policy::Quarantine => "quarantine",
+                    _ => "none",
+                },
+            ),
+            _ => (
+                "fail",
+                match dmarc_result.policy() {
+                    Policy::Reject => "reject",
+                    Policy::Quarantine => "quarantine",
+                    _ => "none",
+                },
+            ),
+        },
+    };
+    env.set("vnd.stoa.dmarc-result", dmarc_res_str);
+    env.set("vnd.stoa.dmarc-policy", dmarc_policy_str);
+
+    env
 }
 
 #[cfg(test)]

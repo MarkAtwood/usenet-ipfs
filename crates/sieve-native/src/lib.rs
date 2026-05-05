@@ -13,6 +13,7 @@
 //! 2. [`form::read_script`] — tokens → `Script` (a uniform form tree)
 //! 3. [`evaluator::eval_script`] — `Script` + message → `Vec<SieveAction>`
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod form;
@@ -21,6 +22,42 @@ pub mod parse_error;
 
 mod evaluator;
 mod message;
+
+/// Runtime environment for a Sieve evaluation (RFC 5183).
+///
+/// Callers populate this before calling [`evaluate`]; the evaluator treats
+/// any name absent from the map as the empty string (RFC 5183 §4).
+///
+/// # Example
+///
+/// ```rust
+/// # use stoa_sieve_native::SieveEnv;
+/// let mut env = SieveEnv::new();
+/// env.set("vnd.stoa.dkim-result", "pass");
+/// assert_eq!(env.get("vnd.stoa.dkim-result"), "pass");
+/// assert_eq!(env.get("unknown"), "");
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct SieveEnv {
+    values: HashMap<String, String>,
+}
+
+impl SieveEnv {
+    /// Create an empty environment.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set an environment value.
+    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.values.insert(key.into(), value.into());
+    }
+
+    /// Get an environment value; returns `""` if the name is unknown (RFC 5183 §4).
+    pub fn get(&self, key: &str) -> &str {
+        self.values.get(key).map(String::as_str).unwrap_or("")
+    }
+}
 
 /// A compiled Sieve script, ready for evaluation.
 ///
@@ -62,8 +99,9 @@ pub fn compile(script: &[u8]) -> Result<CompiledScript, String> {
     let tokens = lexer::tokenize(source).map_err(String::from)?;
     let parsed = form::read_script(&tokens).map_err(String::from)?;
 
-    // Validate require extensions.
-    const KNOWN: &[&str] = &["fileinto", "reject", "variables", "regex"];
+    // Validate require extensions and collect declared extensions.
+    const KNOWN: &[&str] = &["fileinto", "reject", "variables", "regex", "environment"];
+    let mut declared: Vec<String> = Vec::new();
     for stmt in &parsed {
         if let [form::Form::Word(w), rest @ ..] = stmt.as_slice() {
             if w == "require" {
@@ -79,9 +117,19 @@ pub fn compile(script: &[u8]) -> Result<CompiledScript, String> {
                     if !KNOWN.contains(&ext) {
                         return Err(format!("unsupported Sieve extension: {ext}"));
                     }
+                    declared.push(ext.to_string());
                 }
             }
         }
+    }
+
+    // Validate that extensions requiring a `require` declaration are not used
+    // without one.  RFC 5228 §2.10.5: using a capability without declaring it
+    // in `require` is a compile-time error.
+    //
+    // Currently enforced: `environment` test (RFC 5183).
+    if !declared.contains(&"environment".to_string()) {
+        check_no_test_keyword(&parsed, "environment")?;
     }
 
     validate_script(&parsed)?;
@@ -111,6 +159,48 @@ pub fn compile(script: &[u8]) -> Result<CompiledScript, String> {
 /// lists.  Matches the Dovecot Pigeonhole limit; prevents stack exhaustion
 /// on maliciously crafted scripts.
 const MAX_VALIDATE_DEPTH: usize = 32;
+
+/// Return an error if `keyword` appears as a test name anywhere in the script.
+///
+/// Used to enforce that extensions declared in `require` are used before the
+/// extension's test keyword can appear.  Recurses into blocks and test lists.
+fn check_no_test_keyword(script: &form::Script, keyword: &str) -> Result<(), String> {
+    for stmt in script {
+        check_stmt_no_test_keyword(stmt, keyword)?;
+    }
+    Ok(())
+}
+
+fn check_stmt_no_test_keyword(stmt: &form::Stmt, keyword: &str) -> Result<(), String> {
+    // A test keyword appears immediately after `if` or `elsif` as the test
+    // name.  We also need to check inside blocks and test lists recursively.
+    for (i, form) in stmt.iter().enumerate() {
+        match form {
+            form::Form::Word(w) => {
+                // Check if this word is `if` or `elsif` and the next word is the keyword.
+                if w == "if" || w == "elsif" {
+                    if let Some(form::Form::Word(test_name)) = stmt.get(i + 1) {
+                        if test_name == keyword {
+                            return Err(format!(
+                                "test '{keyword}' used without require [\"{keyword}\"]"
+                            ));
+                        }
+                    }
+                }
+            }
+            form::Form::Block(stmts) => {
+                check_no_test_keyword(stmts, keyword)?;
+            }
+            form::Form::TestList(tests) => {
+                for test in tests {
+                    check_stmt_no_test_keyword(test, keyword)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 fn validate_script(script: &form::Script) -> Result<(), String> {
     for stmt in script {
@@ -204,6 +294,9 @@ fn validate_stmt(stmt: &form::Stmt, depth: usize) -> Result<(), String> {
 /// Evaluate a compiled Sieve script against a raw RFC 5322 message.
 ///
 /// `envelope_from` and `envelope_to` are the SMTP envelope addresses.
+/// `env` provides RFC 5183 environment values; pass `&SieveEnv::new()` for
+/// an empty environment when the extension is not used.
+///
 /// Returns the list of actions the script requests; defaults to `[Keep]`
 /// when the script produces no explicit disposition (RFC 5228 §2.10.2).
 pub fn evaluate(
@@ -211,8 +304,9 @@ pub fn evaluate(
     raw_message: &[u8],
     envelope_from: &str,
     envelope_to: &str,
+    env: &SieveEnv,
 ) -> Vec<SieveAction> {
-    evaluator::eval_script(&script.0, raw_message, envelope_from, envelope_to)
+    evaluator::eval_script(&script.0, raw_message, envelope_from, envelope_to, env)
 }
 
 #[cfg(test)]
@@ -381,6 +475,7 @@ mod tests {
             &make_msg("test"),
             "sender@example.com",
             "recip@example.com",
+            &SieveEnv::new(),
         );
         assert_eq!(actions, vec![SieveAction::Keep]);
     }
@@ -388,14 +483,14 @@ mod tests {
     #[test]
     fn eval_explicit_keep() {
         let script = compile(b"keep;").unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::Keep]);
     }
 
     #[test]
     fn eval_discard() {
         let script = compile(b"discard;").unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::Discard]);
     }
 
@@ -405,7 +500,13 @@ mod tests {
             b"require [\"fileinto\"]; if header :contains \"Subject\" \"URGENT\" { fileinto \"INBOX.Urgent\"; }",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("URGENT: fix this"), "", "");
+        let actions = evaluate(
+            &script,
+            &make_msg("URGENT: fix this"),
+            "",
+            "",
+            &SieveEnv::new(),
+        );
         assert_eq!(actions, vec![SieveAction::FileInto("INBOX.Urgent".into())]);
     }
 
@@ -415,21 +516,27 @@ mod tests {
             b"require [\"fileinto\"]; if header :contains \"Subject\" \"URGENT\" { fileinto \"INBOX.Urgent\"; }",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("Normal message"), "", "");
+        let actions = evaluate(
+            &script,
+            &make_msg("Normal message"),
+            "",
+            "",
+            &SieveEnv::new(),
+        );
         assert_eq!(actions, vec![SieveAction::Keep]);
     }
 
     #[test]
     fn eval_reject() {
         let script = compile(b"require [\"reject\"]; reject \"Not wanted\";").unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::Reject("Not wanted".into())]);
     }
 
     #[test]
     fn eval_header_is_case_insensitive() {
         let script = compile(b"if header :is \"subject\" \"exact match\" { discard; }").unwrap();
-        let actions = evaluate(&script, &make_msg("exact match"), "", "");
+        let actions = evaluate(&script, &make_msg("exact match"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::Discard]);
     }
 
@@ -438,7 +545,7 @@ mod tests {
         let script =
             compile(b"require [\"fileinto\"]; if size :over 10 { fileinto \"Big\"; }").unwrap();
         let msg = make_msg("test"); // should be > 10 bytes
-        let actions = evaluate(&script, &msg, "", "");
+        let actions = evaluate(&script, &msg, "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("Big".into())]);
     }
 
@@ -448,7 +555,7 @@ mod tests {
             compile(b"require [\"fileinto\"]; if exists \"X-Spam-Flag\" { fileinto \"Spam\"; }")
                 .unwrap();
         let msg = b"X-Spam-Flag: YES\r\nSubject: test\r\n\r\nBody\r\n";
-        let actions = evaluate(&script, msg, "", "");
+        let actions = evaluate(&script, msg, "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("Spam".into())]);
     }
 
@@ -492,7 +599,7 @@ mod tests {
     #[test]
     fn eval_stop_alone_yields_implicit_keep() {
         let script = compile(b"stop;").unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(
             actions,
             vec![SieveAction::Keep],
@@ -543,7 +650,7 @@ mod tests {
             b"require [\"variables\", \"fileinto\"]; set \"folder\" \"INBOX.Work\"; fileinto \"${folder}\";",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("INBOX.Work".into())]);
     }
 
@@ -553,7 +660,7 @@ mod tests {
             b"require [\"variables\", \"fileinto\"]; set :lower \"folder\" \"INBOX.WORK\"; fileinto \"${folder}\";",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("inbox.work".into())]);
     }
 
@@ -563,7 +670,7 @@ mod tests {
             b"require [\"variables\", \"fileinto\"]; set :upper \"folder\" \"inbox.work\"; fileinto \"${folder}\";",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("INBOX.WORK".into())]);
     }
 
@@ -573,7 +680,7 @@ mod tests {
             b"require [\"variables\", \"fileinto\"]; set :length \"len\" \"hello\"; fileinto \"${len}\";",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("5".into())]);
     }
 
@@ -584,7 +691,7 @@ mod tests {
             b"require [\"variables\", \"fileinto\"]; set :firstline \"f\" \"line1\nline2\"; fileinto \"${f}\";",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("line1".into())]);
     }
 
@@ -594,7 +701,7 @@ mod tests {
             b"require [\"variables\", \"fileinto\"]; set \"MyVar\" \"hello\"; fileinto \"${myvar}\";",
         )
         .unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::FileInto("hello".into())]);
     }
 
@@ -602,7 +709,7 @@ mod tests {
     fn eval_no_variables_require_no_substitution() {
         // Without require ["variables"], ${reason} is literal text (RFC 5229 §3).
         let script = compile(b"require [\"reject\"]; reject \"${reason}\";").unwrap();
-        let actions = evaluate(&script, &make_msg("test"), "", "");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &SieveEnv::new());
         assert_eq!(actions, vec![SieveAction::Reject("${reason}".into())]);
     }
 
@@ -632,7 +739,7 @@ if header :matches "List-Id" "*<*>*" {
 "#;
         let script = compile(script_src).unwrap();
         let msg = b"From: sender@example.com\r\nList-Id: <rust-users.lists.rust-lang.org>\r\nSubject: test\r\n\r\nBody.\r\n";
-        let actions = evaluate(&script, msg, "", "recip@example.com");
+        let actions = evaluate(&script, msg, "", "recip@example.com", &SieveEnv::new());
         assert_eq!(
             actions,
             vec![SieveAction::FileInto(
@@ -656,7 +763,7 @@ if header :matches "List-Id" "*<*>*" {
 "#;
         let script = compile(script_src).unwrap();
         let msg = b"From: sender@example.com\r\nSubject: regular message\r\n\r\nBody.\r\n";
-        let actions = evaluate(&script, msg, "", "recip@example.com");
+        let actions = evaluate(&script, msg, "", "recip@example.com", &SieveEnv::new());
         assert_eq!(
             actions,
             vec![SieveAction::Keep],
@@ -680,11 +787,209 @@ if header :matches "List-Id" "*<*>*" {
 "#;
         let script = compile(script_src).unwrap();
         let msg = b"From: sender@example.com\r\nList-Id: Test List <test.lists.example.com>\r\nSubject: test\r\n\r\nBody.\r\n";
-        let actions = evaluate(&script, msg, "", "");
+        let actions = evaluate(&script, msg, "", "", &SieveEnv::new());
         assert_eq!(
             actions,
             vec![SieveAction::FileInto("List/test.lists.example.com".into())],
             "capture variable ${{2}} must contain the list-id between < and >"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RFC 5183 environment extension tests (issue stoa-p4oc4.7.1)
+    // -----------------------------------------------------------------------
+
+    /// RFC 5183 §4: unknown environment name → empty string → matches "".
+    /// Oracle: RFC 5183 §4 "If the item does not exist, it matches the
+    /// empty string."
+    #[test]
+    fn environment_unknown_name_returns_empty() {
+        let script = compile(
+            br#"require ["environment"]; if environment "x" "" { keep; } else { discard; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        // "x" is not set — should match the empty-string key-list value.
+        // env has no "x", so environment "x" returns ""; "" :is "" → true
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions,
+            vec![SieveAction::Keep],
+            "unknown env name must match empty string (RFC 5183 §4)"
+        );
+        // Explicitly set "x" to a non-empty value — now it must NOT match "".
+        env.set("x", "something");
+        let actions2 = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions2,
+            vec![SieveAction::Discard],
+            "set env name must not match empty string when value is non-empty"
+        );
+    }
+
+    /// environment test matches when the known name has the expected value.
+    /// Oracle: RFC 5183 §4 grammar; known test vector.
+    #[test]
+    fn environment_known_name_matches() {
+        let script = compile(
+            br#"require ["fileinto","environment"]; if environment "vnd.stoa.dkim-result" "pass" { fileinto "Verified"; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.dkim-result", "pass");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions,
+            vec![SieveAction::FileInto("Verified".into())],
+            "environment test must match when value equals key"
+        );
+    }
+
+    /// environment test does not match when the value differs.
+    #[test]
+    fn environment_known_name_no_match() {
+        let script = compile(
+            br#"require ["fileinto","environment"]; if environment "vnd.stoa.dkim-result" "pass" { fileinto "Verified"; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.dkim-result", "fail");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions,
+            vec![SieveAction::Keep],
+            "environment test must not match when value differs from key"
+        );
+    }
+
+    /// environment test with a string-list key — matches any element in list.
+    /// Oracle: RFC 5183 §4; RFC 5228 §2.7 key-list semantics.
+    #[test]
+    fn environment_list_match() {
+        let script = compile(
+            br#"require ["fileinto","environment"]; if environment "vnd.stoa.spf-result" ["fail","softfail"] { fileinto "Spam"; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.spf-result", "softfail");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions,
+            vec![SieveAction::FileInto("Spam".into())],
+            "environment test must match any element in string-list key"
+        );
+    }
+
+    /// environment test without require ["environment"] must fail at compile.
+    /// Oracle: RFC 5228 §2.10.5; RFC 5183 §1.
+    #[test]
+    fn environment_requires_extension() {
+        let result = compile(br#"if environment "vnd.stoa.dkim-result" "pass" { keep; }"#);
+        assert!(
+            result.is_err(),
+            "environment test without require must fail at compile"
+        );
+    }
+
+    /// :contains match type works for environment values.
+    #[test]
+    fn environment_contains_match() {
+        let script = compile(
+            br#"require ["fileinto","environment"]; if environment :contains "vnd.stoa.dkim-domain" "example" { fileinto "Known"; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.dkim-domain", "mail.example.com");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions,
+            vec![SieveAction::FileInto("Known".into())],
+            "environment :contains must work like header :contains"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RFC 5183 E2E scenarios (issue stoa-p4oc4.7.3)
+    // Oracle: known SieveEnv inputs → known expected SieveAction outputs.
+    // -----------------------------------------------------------------------
+
+    /// Scenario 1: DKIM-passing mail filed into Verified by environment test.
+    /// Oracle: SieveEnv vnd.stoa.dkim-result=pass → FileInto("Verified").
+    #[test]
+    fn sieve_environment_e2e_dkim_pass_fileinto_verified() {
+        let script = compile(
+            br#"require ["fileinto","environment"];
+if environment "vnd.stoa.dkim-result" "pass" { fileinto "Verified"; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.dkim-result", "pass");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(actions, vec![SieveAction::FileInto("Verified".into())]);
+    }
+
+    /// Scenario 2: SPF softfail → FileInto("Spam").
+    /// Oracle: SieveEnv vnd.stoa.spf-result=softfail → FileInto("Spam").
+    #[test]
+    fn sieve_environment_e2e_spf_fail_fileinto_spam() {
+        let script = compile(
+            br#"require ["fileinto","environment"];
+if environment "vnd.stoa.spf-result" ["fail","softfail"] { fileinto "Spam"; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.spf-result", "softfail");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(actions, vec![SieveAction::FileInto("Spam".into())]);
+    }
+
+    /// Scenario 3: DMARC policy=reject → Reject action.
+    /// Oracle: SieveEnv vnd.stoa.dmarc-policy=reject → Reject.
+    #[test]
+    fn sieve_environment_e2e_dmarc_reject_policy_discard() {
+        let script = compile(
+            br#"require ["reject","environment"];
+if environment "vnd.stoa.dmarc-policy" "reject" { reject "DMARC policy reject"; }"#,
+        )
+        .unwrap();
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.dmarc-policy", "reject");
+        let actions = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions,
+            vec![SieveAction::Reject("DMARC policy reject".into())]
+        );
+    }
+
+    /// Scenario 4: empty SieveEnv — unknown name matches "none" if set explicitly.
+    /// Oracle: empty env → get("vnd.stoa.dkim-result") = "" (not "none");
+    /// script testing :is "none" must NOT match the empty env case.
+    /// Explicit env set "vnd.stoa.dkim-result"="none" DOES match.
+    #[test]
+    fn sieve_environment_e2e_no_dkim_defaults_to_empty_not_none() {
+        let script = compile(
+            br#"require ["fileinto","environment"];
+if environment "vnd.stoa.dkim-result" "none" { fileinto "NoDKIM"; }"#,
+        )
+        .unwrap();
+
+        // Empty SieveEnv: unknown name → "" which does NOT equal "none".
+        let empty_env = SieveEnv::new();
+        let actions = evaluate(&script, &make_msg("test"), "", "", &empty_env);
+        assert_eq!(
+            actions,
+            vec![SieveAction::Keep],
+            "empty env must return '' for unknown name, not 'none'"
+        );
+
+        // Explicitly set to "none": must match.
+        let mut env = SieveEnv::new();
+        env.set("vnd.stoa.dkim-result", "none");
+        let actions2 = evaluate(&script, &make_msg("test"), "", "", &env);
+        assert_eq!(
+            actions2,
+            vec![SieveAction::FileInto("NoDKIM".into())],
+            "explicitly set 'none' value must match environment test"
         );
     }
 

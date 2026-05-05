@@ -23,7 +23,13 @@ fn cross_check(script_src: &[u8], raw_msg: &[u8], env_from: &str, env_to: &str) 
                 String::from_utf8_lossy(script_src)
             )
         });
-        native::evaluate(&compiled, raw_msg, env_from, env_to)
+        native::evaluate(
+            &compiled,
+            raw_msg,
+            env_from,
+            env_to,
+            &native::SieveEnv::new(),
+        )
     };
     let oracle_result = {
         let compiled = oracle::compile(script_src).unwrap_or_else(|e| {
