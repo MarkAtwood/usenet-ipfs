@@ -17,12 +17,13 @@ use crate::tls::{accept_tls, TlsAcceptor};
 /// listeners, spawning a `run_session` task for each.  Returns when all
 /// listeners close or an unrecoverable error occurs.
 ///
-/// `listener_smtps` is optional: when `Some`, a third listener is active and
-/// connections accepted on it receive implicit TLS before SMTP begins.
+/// `listener_smtps` — optional implicit-TLS listener.
+/// `starttls_acceptor` — when `Some`, ports 25/587 advertise and handle STARTTLS.
 pub async fn run_server(
     listener_25: TcpListener,
     listener_587: TcpListener,
     listener_smtps: Option<(TcpListener, TlsAcceptor)>,
+    starttls_acceptor: Option<Arc<TlsAcceptor>>,
     config: Arc<Config>,
     nntp_queue: Arc<NntpQueue>,
     pool: Option<SqlitePool>,
@@ -198,6 +199,7 @@ pub async fn run_server(
         let cache = sieve_cache.clone();
         let cred_store = Arc::clone(&credential_store);
         let inbox_id = inbox_mailbox_id.clone();
+        let starttls = starttls_acceptor.clone();
 
         match accepted {
             Accepted::Plain(stream, peer_addr, is_submission) => {
@@ -206,7 +208,7 @@ pub async fn run_server(
                 tokio::spawn(async move {
                     let _permit = permit;
                     run_session(
-                        stream,
+                        Box::new(stream),
                         false,
                         is_submission,
                         peer_str,
@@ -219,6 +221,7 @@ pub async fn run_server(
                         mail_pool_clone,
                         cache,
                         inbox_id,
+                        starttls,
                     )
                     .await;
                 });
@@ -229,9 +232,9 @@ pub async fn run_server(
                 tokio::spawn(async move {
                     let _permit = permit;
                     run_session(
-                        *tls_stream,
+                        Box::new(*tls_stream),
                         true,
-                        false, // SMTPS is always TLS, is_submission flag not needed
+                        false,
                         peer_str,
                         config,
                         cred_store,
@@ -242,6 +245,7 @@ pub async fn run_server(
                         mail_pool_clone,
                         cache,
                         inbox_id,
+                        None,
                     )
                     .await;
                 });
@@ -309,6 +313,7 @@ mod tests {
             listener_25,
             listener_587,
             None,
+            None,
             config,
             nntp_queue,
             None,
@@ -341,6 +346,7 @@ mod tests {
         tokio::spawn(run_server(
             listener_25,
             listener_587,
+            None,
             None,
             config,
             nntp_queue,

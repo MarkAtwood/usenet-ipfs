@@ -8,6 +8,7 @@ use mail_auth::MessageAuthenticator;
 use sqlx::SqlitePool;
 
 use crate::dns_cache::DnsCache;
+use crate::tls::TlsAcceptor;
 use stoa_auth::CredentialStore;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
@@ -25,6 +26,11 @@ use crate::metrics::{
 };
 use crate::queue::{header_section_end, NntpQueue};
 use crate::{routing, store};
+
+
+/// Combined read/write trait for SMTP stream objects.
+pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
 
 /// Thread-safe cache of compiled Sieve scripts, keyed by username.
 ///
@@ -163,8 +169,8 @@ enum SessionState {
 /// `is_submission`: `true` when the connection arrived on the submission port
 /// (587).  AUTH PLAIN is advertised on submission sessions even without TLS so
 /// that mail clients can authenticate for demo/dev deployments without TLS.
-pub async fn run_session<S>(
-    stream: S,
+pub async fn run_session(
+    stream: Box<dyn AsyncStream>,
     is_tls: bool,
     is_submission: bool,
     peer_addr: String,
@@ -177,9 +183,8 @@ pub async fn run_session<S>(
     mail_pool: Option<SqlitePool>,
     sieve_cache: Option<SieveCache>,
     inbox_mailbox_id: Option<String>,
-) where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
+    tls_acceptor: Option<Arc<TlsAcceptor>>,
+) {
     SMTP_CONNECTIONS_TOTAL.inc();
 
     let (read_half, mut write_half) = tokio::io::split(stream);
@@ -275,28 +280,17 @@ pub async fn run_session<S>(
                     }
                     continue;
                 }
-                // STARTTLS is not advertised even when TLS is configured
-                // (cert+key set), because the upgrade path is not yet
-                // implemented (stoa-ryw.3).  Do not add STARTTLS to this
-                // response until the full upgrade flow exists: a remote MTA
-                // that sees STARTTLS in EHLO will send the STARTTLS command,
-                // receive 454, and abort delivery.
-                //
-                // AUTH PLAIN is advertised on SMTPS (is_tls=true) and on the
-                // submission port (is_submission=true) so mail clients can
-                // authenticate on port 587 even without TLS in demo deployments.
-                // Port 25 (MTA-to-MTA) never advertises AUTH.
-                let auth_line = if (is_tls || is_submission) && !credential_store.is_empty() {
+                // RFC 3207: advertise STARTTLS when tls_acceptor is Some.
+                let starttls_line = if !is_tls && tls_acceptor.is_some() { "250-STARTTLS\r\n" } else { "" };
+                let auth_line = if (is_tls || is_submission || tls_acceptor.is_some()) && !credential_store.is_empty() {
                     "250-AUTH PLAIN\r\n"
                 } else {
                     ""
                 };
-                // RFC 8689 §2: REQUIRETLS MUST only be advertised on a TLS
-                // session so that clients know the server can enforce it.
                 let requiretls_line = if is_tls { "250-REQUIRETLS\r\n" } else { "" };
                 let resp = format!(
-                    "250-{}\r\n250-SIZE {}\r\n250-8BITMIME\r\n250-SMTPUTF8\r\n250-PIPELINING\r\n{}{}250 OK\r\n",
-                    config.hostname, config.limits.max_message_bytes, auth_line, requiretls_line
+                    "250-{}\r\n250-SIZE {}\r\n250-8BITMIME\r\n250-SMTPUTF8\r\n250-PIPELINING\r\n{}{}{}250 OK\r\n",
+                    config.hostname, config.limits.max_message_bytes, starttls_line, auth_line, requiretls_line
                 );
                 if write_half.write_all(resp.as_bytes()).await.is_err() {
                     break;
@@ -327,17 +321,12 @@ pub async fn run_session<S>(
             }
 
             "AUTH" => {
-                // RFC 4954 §4: AUTH is only accepted on a TLS-protected
-                // connection.  On cleartext sessions reject with 534 to
-                // prevent credentials from being sent in the clear.
                 if !is_tls {
-                    // RFC 4954 §4: after 534 the client MUST NOT retry on
-                    // this connection; close so it reconnects over TLS.
-                    let _ = write_half
-                        .write_all(
-                            b"534 5.7.9 Encryption required for requested authentication mechanism\r\n",
-                        )
-                        .await;
+                    if tls_acceptor.is_some() {
+                        let _ = write_half.write_all(b"530 5.7.0 Must issue a STARTTLS command first\r\n").await;
+                    } else {
+                        let _ = write_half.write_all(b"534 5.7.9 Encryption required for requested authentication mechanism\r\n").await;
+                    }
                     break;
                 }
                 if authenticated_user.is_some() {
@@ -826,19 +815,26 @@ pub async fn run_session<S>(
             }
 
             "STARTTLS" => {
-                // STARTTLS upgrade is not yet implemented. Return 454 rather
-                // than 502 (command not implemented) so that MTAs that
-                // opportunistically offer STARTTLS but do not require it
-                // gracefully fall back to plaintext. Advertising STARTTLS in
-                // EHLO would cause STARTTLS-policy enforcers to fail delivery,
-                // so it is omitted from EHLO until a full implementation exists.
-                if write_half
-                    .write_all(b"454 TLS not available\r\n")
-                    .await
-                    .is_err()
-                {
-                    break;
+                if is_tls {
+                    if write_half.write_all(b"503 5.5.1 STARTTLS already active\r\n").await.is_err() { break; }
+                    continue;
                 }
+                let Some(ref acceptor) = tls_acceptor else {
+                    if write_half.write_all(b"454 TLS not available\r\n").await.is_err() { break; }
+                    continue;
+                };
+                if write_half.write_all(b"220 Ready to start TLS\r\n").await.is_err() { break; }
+                let plain_stream = reader.into_inner().unsplit(write_half);
+                let tls_stream = match acceptor.accept(plain_stream).await {
+                    Ok(s) => s,
+                    Err(e) => { info!(peer = %peer_addr, "STARTTLS handshake failed: {e}"); return; }
+                };
+                Box::pin(run_session(
+                    Box::new(tls_stream), true, is_submission, peer_addr,
+                    config, credential_store, nntp_queue, auth, dns_cache,
+                    pool, mail_pool, sieve_cache, inbox_mailbox_id, None,
+                )).await;
+                return;
             }
 
             _ => {
@@ -1454,7 +1450,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.expect("accept");
             run_session(
-                stream,
+                Box::new(stream),
                 false,
                 false,
                 peer.to_string(),
@@ -1464,6 +1460,7 @@ mod tests {
                 None,
                 Arc::new(crate::dns_cache::DnsCache::new()),
                 pool,
+                None,
                 None,
                 None,
                 None,
@@ -1636,7 +1633,7 @@ mod tests {
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
             run_session(
-                stream,
+                Box::new(stream),
                 false,
                 false,
                 peer.to_string(),
@@ -1646,6 +1643,7 @@ mod tests {
                 Some(auth2),
                 Arc::new(crate::dns_cache::DnsCache::new()),
                 Some(pool2),
+                None,
                 None,
                 None,
                 None,
@@ -2116,13 +2114,12 @@ mod tests {
         );
     }
 
-    // ── ryw.3: STARTTLS must not appear in EHLO even when TLS is configured ──
+    // ── STARTTLS EHLO advertisement ───────────────────────────────────────────
 
+    // STARTTLS must NOT appear in EHLO when no tls_acceptor is provided.
     #[tokio::test]
-    async fn test_ehlo_no_starttls_even_when_tls_configured() {
-        // STARTTLS upgrade is not yet implemented; advertising it would break
-        // MTAs that enforce STARTTLS-policy (they would connect, see STARTTLS
-        // in EHLO, send STARTTLS, get 454, and fail delivery).
+    async fn test_ehlo_no_starttls_without_tls_acceptor() {
+        // config has cert/key paths set but tls_acceptor is None.
         let config = Arc::new(Config {
             hostname: "test.example.com".to_string(),
             listen: ListenConfig {
@@ -2160,12 +2157,83 @@ mod tests {
 
         assert!(
             !response.contains("STARTTLS"),
-            "STARTTLS must not appear in EHLO until implemented: {response}"
+            "STARTTLS must not appear in EHLO when tls_acceptor is None: {response}"
         );
         assert!(
             response.contains("250"),
             "expected 250 EHLO response: {response}"
         );
+    }
+
+
+    // STARTTLS must appear in EHLO when tls_acceptor is Some. Oracle: RFC 3207 §3.
+    #[tokio::test]
+    async fn test_ehlo_includes_starttls_when_tls_acceptor_present() {
+        use rcgen::generate_simple_self_signed;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let config = test_config();
+        let cert_key = generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("test.crt");
+        let key_path = dir.path().join("test.key");
+        std::fs::write(&cert_path, cert_key.cert.pem().as_bytes()).expect("write cert");
+        std::fs::write(&key_path, cert_key.key_pair.serialize_pem().as_bytes()).expect("write key");
+        let acceptor = Arc::new(crate::tls::build_tls_acceptor(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).expect("build acceptor"));
+        let queue_dir = tempfile::tempdir().expect("tempdir");
+        let nntp_queue = Arc::new(NntpQueue::new(queue_dir.path(), None).expect("NntpQueue"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let config2 = config.clone();
+        let queue2 = Arc::clone(&nntp_queue);
+        let acceptor2 = Some(Arc::clone(&acceptor));
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.expect("accept");
+            run_session(Box::new(stream), false, false, peer.to_string(), config2,
+                Arc::new(CredentialStore::empty()), queue2, None,
+                Arc::new(crate::dns_cache::DnsCache::new()), None, None, None, None, acceptor2).await;
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        client.write_all(b"EHLO client.example.com\r\nQUIT\r\n").await.expect("write");
+        client.shutdown().await.expect("shutdown");
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.expect("read");
+        assert!(response.contains("STARTTLS"), "STARTTLS must appear in EHLO when tls_acceptor is Some: {response}");
+    }
+
+    // AUTH before STARTTLS returns 530. Oracle: RFC 4954 §4.
+    #[tokio::test]
+    async fn test_auth_before_starttls_returns_530() {
+        use rcgen::generate_simple_self_signed;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let config = test_config();
+        let cert_key = generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("test.crt");
+        let key_path = dir.path().join("test.key");
+        std::fs::write(&cert_path, cert_key.cert.pem().as_bytes()).expect("write cert");
+        std::fs::write(&key_path, cert_key.key_pair.serialize_pem().as_bytes()).expect("write key");
+        let acceptor = Arc::new(crate::tls::build_tls_acceptor(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).expect("build acceptor"));
+        let queue_dir = tempfile::tempdir().expect("tempdir");
+        let nntp_queue = Arc::new(NntpQueue::new(queue_dir.path(), None).expect("NntpQueue"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let config2 = config.clone();
+        let queue2 = Arc::clone(&nntp_queue);
+        let acceptor2 = Some(Arc::clone(&acceptor));
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.expect("accept");
+            run_session(Box::new(stream), false, false, peer.to_string(), config2,
+                Arc::new(CredentialStore::empty()), queue2, None,
+                Arc::new(crate::dns_cache::DnsCache::new()), None, None, None, None, acceptor2).await;
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        client.write_all(b"EHLO client.example.com\r\nAUTH PLAIN\r\n").await.expect("write");
+        client.shutdown().await.expect("shutdown");
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.expect("read");
+        assert!(response.contains("530"), "AUTH before STARTTLS must return 530, got: {response}");
+        assert!(response.contains("5.7.0"), "530 must carry 5.7.0, got: {response}");
+        assert!(!response.contains("334"), "No AUTH challenge before STARTTLS: {response}");
     }
 
     // ── EHLO/HELO injection guard ─────────────────────────────────────────────
@@ -2246,7 +2314,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
             run_session(
-                stream,
+                Box::new(stream),
                 false,
                 false,
                 peer.to_string(),
@@ -2255,6 +2323,7 @@ mod tests {
                 queue2,
                 None,
                 Arc::new(crate::dns_cache::DnsCache::new()),
+                None,
                 None,
                 None,
                 None,
@@ -2539,7 +2608,7 @@ mod tests {
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.expect("accept");
             run_session(
-                stream,
+                Box::new(stream),
                 true,
                 false,
                 peer.to_string(),
@@ -2548,6 +2617,7 @@ mod tests {
                 queue2,
                 None,
                 Arc::new(crate::dns_cache::DnsCache::new()),
+                None,
                 None,
                 None,
                 None,
@@ -2608,6 +2678,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await;
             });
@@ -2657,6 +2728,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await;
             });
@@ -2702,6 +2774,7 @@ mod tests {
                     queue2,
                     None,
                     Arc::new(crate::dns_cache::DnsCache::new()),
+                    None,
                     None,
                     None,
                     None,

@@ -150,7 +150,7 @@ async fn drive(
     let server_task = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.expect("accept");
         run_session(
-            stream,
+            Box::new(stream),
             false,
             false,
             peer.to_string(),
@@ -160,6 +160,7 @@ async fn drive(
             None,
             std::sync::Arc::new(stoa_smtp::dns_cache::DnsCache::new()),
             pool,
+            None,
             None,
             None,
             None,

@@ -143,7 +143,7 @@ async fn drive(client_script: &[u8], is_tls: bool, config: Arc<Config>) -> Strin
             s
         });
         run_session(
-            stream,
+            Box::new(stream),
             is_tls,
             false,
             peer.to_string(),
@@ -152,6 +152,7 @@ async fn drive(client_script: &[u8], is_tls: bool, config: Arc<Config>) -> Strin
             queue2,
             None,
             std::sync::Arc::new(stoa_smtp::dns_cache::DnsCache::new()),
+            None,
             None,
             None,
             None,

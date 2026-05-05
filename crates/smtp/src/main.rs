@@ -76,53 +76,35 @@ async fn main() {
         }
     };
 
-    // Bind the optional SMTPS (port 465 implicit TLS) listener and build the
-    // TLS acceptor.  Both must succeed or startup aborts — a partially-bound
-    // server would silently drop SMTPS connections.
-    let listener_smtps = if let Some(ref smtps_addr) = config.listen.smtps_addr {
-        let cert_path = config.tls.cert_path.as_deref().unwrap_or("");
-        let key_path = config.tls.key_path.as_deref().unwrap_or("");
-        let acceptor = if key_path.starts_with("secretx:") {
-            let store = match secretx::from_uri(key_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("tls.key_path: invalid secretx URI: {e}");
-                    std::process::exit(1);
+    // Build TLS acceptor (used for SMTPS and STARTTLS).
+    let tls_acceptor_opt: Option<Arc<stoa_smtp::tls::TlsAcceptor>> =
+        if let (Some(cert_path), Some(key_path)) =
+            (config.tls.cert_path.as_deref(), config.tls.key_path.as_deref())
+        {
+            let acceptor = if key_path.starts_with("secretx:") {
+                let store = match secretx::from_uri(key_path) { Ok(s) => s, Err(e) => { error!("{e}"); std::process::exit(1); } };
+                let secret = match store.get().await { Ok(v) => v, Err(e) => { error!("{e}"); std::process::exit(1); } };
+                match stoa_smtp::tls::build_tls_acceptor_with_key_bytes(cert_path, secret.as_bytes(), key_path) {
+                    Ok(a) => a, Err(e) => { error!("failed to build TLS acceptor: {e}"); std::process::exit(1); }
+                }
+            } else {
+                match build_tls_acceptor(cert_path, key_path) {
+                    Ok(a) => a, Err(e) => { error!("failed to build TLS acceptor: {e}"); std::process::exit(1); }
                 }
             };
-            let secret = match store.get().await {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("tls.key_path: secretx retrieval failed: {e}");
-                    std::process::exit(1);
-                }
-            };
-            match stoa_smtp::tls::build_tls_acceptor_with_key_bytes(
-                cert_path,
-                secret.as_bytes(),
-                key_path,
-            ) {
-                Ok(a) => a,
-                Err(e) => {
-                    error!("failed to build SMTPS TLS acceptor: {e}");
-                    std::process::exit(1);
-                }
-            }
+            Some(Arc::new(acceptor))
         } else {
-            match build_tls_acceptor(cert_path, key_path) {
-                Ok(a) => a,
-                Err(e) => {
-                    error!("failed to build SMTPS TLS acceptor: {e}");
-                    std::process::exit(1);
-                }
-            }
+            None
         };
+
+    let listener_smtps = if let Some(ref smtps_addr) = config.listen.smtps_addr {
+        let acceptor = tls_acceptor_opt.as_deref().cloned().unwrap_or_else(|| {
+            error!("smtps_addr requires tls.cert_path and tls.key_path");
+            std::process::exit(1);
+        });
         match TcpListener::bind(smtps_addr).await {
             Ok(l) => Some((l, acceptor)),
-            Err(e) => {
-                error!("failed to bind smtps_addr {smtps_addr}: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => { error!("failed to bind smtps_addr {smtps_addr}: {e}"); std::process::exit(1); }
         }
     } else {
         None
@@ -287,7 +269,7 @@ async fn main() {
     }
 
     tokio::select! {
-        r = run_server(listener_25, listener_587, listener_smtps, config, nntp_queue, pool, sieve_cache) => {
+        r = run_server(listener_25, listener_587, listener_smtps, tls_acceptor_opt, config, nntp_queue, pool, sieve_cache) => {
             if let Err(e) = r {
                 eprintln!("error: {e}");
                 std::process::exit(1);
