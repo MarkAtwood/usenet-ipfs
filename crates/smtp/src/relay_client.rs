@@ -517,11 +517,9 @@ async fn do_deliver(
 static TLS_CLIENT_CONFIG: std::sync::LazyLock<Arc<rustls::ClientConfig>> =
     std::sync::LazyLock::new(|| {
         // LazyLock already guarantees single execution — no OnceLock needed here.
-        if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
-            // Only fails if a provider was already installed — not fatal,
-            // but indicates a programming mistake (double-init).
-            tracing::warn!("rustls crypto provider already installed: {e:?}");
-        }
+        // Use the central helper which idempotently installs ring and silences
+        // the double-install error that fires routinely in tests.
+        stoa_tls::install_ring_provider();
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Arc::new(

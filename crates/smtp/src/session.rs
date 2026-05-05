@@ -2223,7 +2223,7 @@ mod tests {
     async fn test_ehlo_includes_starttls_when_tls_acceptor_present() {
         use rcgen::generate_simple_self_signed;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        stoa_tls::install_ring_provider();
         let config = test_config();
         let cert_key = generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2287,7 +2287,7 @@ mod tests {
         use rcgen::generate_simple_self_signed;
         use stoa_auth::UserCredential;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        stoa_tls::install_ring_provider();
 
         // Build a credential store with one user (cost 4 = minimum valid bcrypt cost).
         let hash = bcrypt::hash("secret", 4).expect("bcrypt must not fail at cost 4");
@@ -2366,7 +2366,7 @@ mod tests {
     async fn test_auth_before_starttls_returns_530() {
         use rcgen::generate_simple_self_signed;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        stoa_tls::install_ring_provider();
         let config = test_config();
         let cert_key = generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2438,7 +2438,7 @@ mod tests {
         use stoa_auth::UserCredential;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        stoa_tls::install_ring_provider();
         let hash = bcrypt::hash("hunter2", 4).expect("bcrypt");
         let creds = vec![UserCredential {
             username: "alice".to_string(),

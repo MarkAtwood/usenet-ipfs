@@ -72,8 +72,13 @@ fn glob_matches(pattern: &str, domain: &str) -> bool {
         // (non-empty and containing no '.').
         let domain_lower = domain.to_ascii_lowercase();
         let suffix_lower = suffix.to_ascii_lowercase();
+        // Avoid a heap allocation: strip the suffix text first, then the dot
+        // separator, and verify the remaining label is a single DNS component.
+        // Using format!(".{suffix_lower}") would allocate on every call; this
+        // path is hot (called per-recipient per-message).
         let prefix = domain_lower
-            .strip_suffix(&format!(".{suffix_lower}"))
+            .strip_suffix(suffix_lower.as_str())
+            .and_then(|s| s.strip_suffix('.'))
             .unwrap_or("");
         return !prefix.is_empty() && !prefix.contains('.');
     }
