@@ -11,10 +11,13 @@ path = "src/lib.rs"
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-pemfile = "2"
+tracing = "0.1"
 x509-parser = { version = "0.16", default-features = false }
 
 [dev-dependencies]
 rcgen = "0.13"
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "macros", "io-util", "time"] }
+tokio-rustls = "0.26"
 # ring provides a CryptoProvider for rustls unit tests
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }

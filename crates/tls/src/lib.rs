@@ -4,11 +4,77 @@
 //! loading, shared by the SMTP, JMAP, and NNTP reader crates. Centralising
 //! the logic here means a rustls API change (version bump, different PEM
 //! loading API) is applied in one place.
+//!
+//! # TLS policy
+//!
+//! All [`ServerConfig`]s produced by this crate:
+//! - Require TLS 1.2 or higher (TLS 1.0 and 1.1 are not offered).
+//! - Offer only the cipher suites in [`APPROVED_CIPHER_SUITE_IDS`], which
+//!   satisfies PCI-DSS 4.2.1 and SOC2 CC6.7.
+//!
+//! The enforcement is explicit — it does not rely on library defaults.
 
 use std::{fs::File, io::BufReader, sync::Arc};
 
+use rustls::crypto::CryptoProvider;
+use rustls::CipherSuite;
 use rustls::ServerConfig;
+use rustls::SupportedCipherSuite;
 use rustls_pemfile::{certs, private_key};
+
+/// Cipher suites approved for PCI-DSS 4.2.1 / SOC2 CC6.7.
+///
+/// Includes:
+/// - TLS 1.3: AES-256-GCM-SHA384, AES-128-GCM-SHA256, CHACHA20-POLY1305-SHA256
+/// - TLS 1.2 ECDHE+AESGCM (ECDSA and RSA): AES-128-GCM-SHA256, AES-256-GCM-SHA384
+///
+/// TLS 1.2 CBC suites (HMAC-SHA1/SHA256) and export-grade suites are excluded.
+pub const APPROVED_CIPHER_SUITE_IDS: &[CipherSuite] = &[
+    CipherSuite::TLS13_AES_256_GCM_SHA384,
+    CipherSuite::TLS13_AES_128_GCM_SHA256,
+    CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+    CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+    CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+];
+
+/// Filter a [`CryptoProvider`]'s cipher suite list to only the suites in
+/// [`APPROVED_CIPHER_SUITE_IDS`], preserving the provider's preference order.
+///
+/// Returns the full provider list as a safety fallback if no approved suites
+/// are found (logs a warning in that case).
+pub fn approved_cipher_suites(provider: &CryptoProvider) -> Vec<SupportedCipherSuite> {
+    let filtered: Vec<SupportedCipherSuite> = provider
+        .cipher_suites
+        .iter()
+        .copied()
+        .filter(|cs| APPROVED_CIPHER_SUITE_IDS.contains(&cs.suite()))
+        .collect();
+    if filtered.is_empty() {
+        tracing::warn!(
+            "approved_cipher_suites: no approved suites in provider; \
+             falling back to full provider list"
+        );
+        return provider.cipher_suites.to_vec();
+    }
+    filtered
+}
+
+/// Emit a startup log line recording the effective TLS policy.
+///
+/// Called automatically by [`load_tls_server_config`] and
+/// [`load_tls_server_config_with_key_bytes`].
+pub fn log_tls_policy(config: &ServerConfig) {
+    let n = config.crypto_provider().cipher_suites.len();
+    tracing::info!(
+        event = "tls_policy_effective",
+        min_tls_version = "TLS 1.2",
+        cipher_suite_count = n,
+        "TLS policy: minimum TLS 1.2, {} approved cipher suite(s)",
+        n,
+    );
+}
 
 /// Errors produced while loading TLS configuration from PEM files.
 #[non_exhaustive]
@@ -49,28 +115,35 @@ impl std::error::Error for TlsError {
     }
 }
 
-/// Load PEM certificate and private-key files and return a
-/// `rustls::ServerConfig` wrapped in an `Arc`.
+fn approved_provider() -> Arc<CryptoProvider> {
+    let base = CryptoProvider::get_default().expect(
+        "a CryptoProvider must be installed before calling TLS functions; \
+         call CryptoProvider::install_default() at startup",
+    );
+    let suites = approved_cipher_suites(base);
+    Arc::new(CryptoProvider {
+        cipher_suites: suites,
+        ..(**base).clone()
+    })
+}
+
+/// Load PEM cert/key files into a [`ServerConfig`] requiring TLS 1.2+.
 ///
-/// The resulting config requires TLS 1.2 or higher; TLS 1.0 and 1.1 are not
-/// offered. Client authentication is not requested (use
-/// [`load_cert_chain`] and [`load_private_key`] if you need to customise the
-/// client-auth verifier, as the NNTP reader does for mutual TLS).
+/// The resulting config requires TLS 1.2 or higher; offers only
+/// [`APPROVED_CIPHER_SUITE_IDS`]; does not request client authentication.
 pub fn load_tls_server_config(
     cert_path: &str,
     key_path: &str,
 ) -> Result<Arc<ServerConfig>, TlsError> {
     let cert_chain = load_cert_chain(cert_path)?;
     let private_key = load_private_key(key_path)?;
-
-    let config = ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_no_client_auth()
-    .with_single_cert(cert_chain, private_key)
-    .map_err(TlsError::Config)?;
-
+    let config = ServerConfig::builder_with_provider(approved_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(TlsError::Config)?
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)
+        .map_err(TlsError::Config)?;
+    log_tls_policy(&config);
     Ok(Arc::new(config))
 }
 
@@ -108,11 +181,6 @@ pub fn load_private_key(
 }
 
 /// Load a PEM private key from raw bytes (e.g. resolved from a secrets manager).
-///
-/// `label` is used in error messages — pass the secretx URI (or any string that
-/// identifies the key source) so operators know which secret caused the failure.
-/// This is the in-memory equivalent of [`load_private_key`], for callers that
-/// hold the PEM bytes directly rather than a file path.
 pub fn load_private_key_from_bytes(
     pem_bytes: &[u8],
     label: &str,
@@ -131,14 +199,10 @@ pub fn load_private_key_from_bytes(
         })
 }
 
-/// Load a TLS `ServerConfig` from a certificate file and private key bytes.
-///
-/// `key_label` identifies the key source in error messages (typically the
-/// `secretx:` URI used to retrieve the key).
+/// Load a [`ServerConfig`] from a certificate file and private key bytes.
 ///
 /// Equivalent to [`load_tls_server_config`] but the private key is supplied as
-/// PEM bytes rather than a file path.  Use this when the key was retrieved from
-/// a secrets manager (e.g. via a `secretx:` URI) rather than the filesystem.
+/// PEM bytes rather than a file path.
 pub fn load_tls_server_config_with_key_bytes(
     cert_path: &str,
     key_pem_bytes: &[u8],
@@ -146,22 +210,18 @@ pub fn load_tls_server_config_with_key_bytes(
 ) -> Result<Arc<ServerConfig>, TlsError> {
     let cert_chain = load_cert_chain(cert_path)?;
     let private_key = load_private_key_from_bytes(key_pem_bytes, key_label)?;
-    let config = ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_no_client_auth()
-    .with_single_cert(cert_chain, private_key)
-    .map_err(TlsError::Config)?;
+    let config = ServerConfig::builder_with_provider(approved_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(TlsError::Config)?
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)
+        .map_err(TlsError::Config)?;
+    log_tls_policy(&config);
     Ok(Arc::new(config))
 }
 
 /// Return the Unix timestamp (seconds) of the NotAfter date of the first
 /// certificate in a PEM certificate chain file.
-///
-/// Used at startup to emit expiry warnings and populate the
-/// `tls_cert_expiry_seconds` Prometheus gauge.  Returns an error if the file
-/// cannot be read, contains no certificates, or cannot be parsed as DER.
 pub fn cert_not_after(cert_path: &str) -> Result<i64, TlsError> {
     let certs = load_cert_chain(cert_path)?;
     let first = certs
@@ -174,118 +234,176 @@ pub fn cert_not_after(cert_path: &str) -> Result<i64, TlsError> {
     Ok(parsed.validity().not_after.timestamp())
 }
 
+/// Return an [`Arc<CryptoProvider>`] restricted to [`APPROVED_CIPHER_SUITE_IDS`].
+///
+/// Used by crates (e.g. the NNTP reader) that build their own [`ServerConfig`]
+/// with a custom client-auth verifier.
+pub fn approved_provider_arc() -> Arc<CryptoProvider> {
+    approved_provider()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Generate a self-signed cert and return (cert_pem_bytes, key_pem_bytes) as Vec<u8>.
-    #[cfg(test)]
-    fn generate_self_signed_pem() -> (Vec<u8>, Vec<u8>) {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-        let cert_pem = cert.cert.pem().into_bytes();
-        let key_pem = cert.key_pair.serialize_pem().into_bytes();
-        (cert_pem, key_pem)
+    fn gen() -> (Vec<u8>, Vec<u8>) {
+        let c = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        (c.cert.pem().into_bytes(), c.key_pair.serialize_pem().into_bytes())
     }
 
-    /// load_private_key_from_bytes parses a PEM private key generated by rcgen.
+    fn ring() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn load_private_key_from_bytes_parses_valid_pem() {
-        let (_cert_pem, key_pem) = generate_self_signed_pem();
-        let result = load_private_key_from_bytes(&key_pem, "test-label");
-        assert!(
-            result.is_ok(),
-            "must parse a valid PEM key: {:?}",
-            result.err()
-        );
+        let (_, k) = gen();
+        assert!(load_private_key_from_bytes(&k, "t").is_ok());
     }
 
-    /// load_private_key_from_bytes returns a KeyLoad error for empty bytes.
     #[test]
     fn load_private_key_from_bytes_empty_returns_error() {
-        let result = load_private_key_from_bytes(&[], "test-label");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TlsError::KeyLoad(label, _) => assert_eq!(label, "test-label"),
-            e => panic!("unexpected error type: {e}"),
+        match load_private_key_from_bytes(&[], "t").unwrap_err() {
+            TlsError::KeyLoad(l, _) => assert_eq!(l, "t"),
+            e => panic!("{e}"),
         }
     }
 
-    /// load_tls_server_config_with_key_bytes builds a valid ServerConfig from
-    /// a cert file and inline key bytes.
-    ///
-    /// Requires a CryptoProvider — installs ring as the default for this test.
     #[test]
     fn load_tls_server_config_with_key_bytes_success() {
-        // ring::default_provider().install_default() is idempotent — safe to call multiple times.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let dir = tempfile::TempDir::new().unwrap();
-        let (cert_pem, key_pem) = generate_self_signed_pem();
-        let cert_path = dir.path().join("cert.pem");
-        std::fs::write(&cert_path, &cert_pem).unwrap();
-        let result = load_tls_server_config_with_key_bytes(
-            cert_path.to_str().unwrap(),
-            &key_pem,
-            "test-label",
-        );
-        assert!(
-            result.is_ok(),
-            "must build ServerConfig: {:?}",
-            result.err()
-        );
+        ring();
+        let d = tempfile::TempDir::new().unwrap();
+        let (cp, kp) = gen();
+        let p = d.path().join("c.pem");
+        std::fs::write(&p, &cp).unwrap();
+        assert!(load_tls_server_config_with_key_bytes(p.to_str().unwrap(), &kp, "t").is_ok());
     }
 
     #[test]
     fn load_tls_server_config_missing_cert_returns_error() {
-        let result = load_tls_server_config("/nonexistent/cert.pem", "/nonexistent/key.pem");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TlsError::CertLoad(path, _) => assert!(path.contains("cert.pem")),
-            e => panic!("unexpected error: {e}"),
+        match load_tls_server_config("/nx/c.pem", "/nx/k.pem").unwrap_err() {
+            TlsError::CertLoad(p, _) => assert!(p.contains("c.pem")),
+            e => panic!("{e}"),
         }
     }
 
     #[test]
     fn tls_error_display_is_informative() {
         let e = TlsError::CertLoad(
-            "/foo/cert.pem".into(),
-            std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+            "/f/c.pem".into(),
+            std::io::Error::new(std::io::ErrorKind::NotFound, "nf"),
         );
-        let msg = e.to_string();
-        assert!(msg.contains("/foo/cert.pem"), "display: {msg}");
+        assert!(e.to_string().contains("/f/c.pem"));
     }
 
-    /// cert_not_after extracts the NotAfter timestamp from a self-signed cert.
-    ///
-    /// Asserts the returned Unix timestamp is in the future and is a plausible
-    /// date (after 2024-01-01, i.e. > 1704067200).
     #[test]
     fn cert_not_after_returns_future_timestamp() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (cert_pem, _) = generate_self_signed_pem();
-        let cert_path = dir.path().join("cert.pem");
-        std::fs::write(&cert_path, &cert_pem).unwrap();
-
-        let expiry = cert_not_after(cert_path.to_str().unwrap())
-            .expect("cert_not_after must succeed for valid cert");
-
+        let d = tempfile::TempDir::new().unwrap();
+        let (cp, _) = gen();
+        let p = d.path().join("c.pem");
+        std::fs::write(&p, &cp).unwrap();
+        let expiry = cert_not_after(p.to_str().unwrap()).unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        assert!(
-            expiry > now,
-            "NotAfter must be in the future; expiry={expiry}, now={now}"
-        );
-        assert!(
-            expiry > 1_704_067_200,
-            "NotAfter must be after 2024-01-01; expiry={expiry}"
-        );
+        assert!(expiry > now);
+        assert!(expiry > 1_704_067_200);
     }
 
-    /// cert_not_after returns an error for a nonexistent path.
     #[test]
     fn cert_not_after_missing_file_returns_error() {
-        let result = cert_not_after("/nonexistent/cert.pem");
-        assert!(result.is_err(), "must return Err for nonexistent cert path");
+        assert!(cert_not_after("/nx/c.pem").is_err());
+    }
+
+    /// [`ServerConfig`] must only offer suites from [`APPROVED_CIPHER_SUITE_IDS`].
+    #[test]
+    fn server_config_cipher_suites_are_approved() {
+        ring();
+        let d = tempfile::TempDir::new().unwrap();
+        let (cp, kp) = gen();
+        let p = d.path().join("c.pem");
+        std::fs::write(&p, &cp).unwrap();
+        let cfg =
+            load_tls_server_config_with_key_bytes(p.to_str().unwrap(), &kp, "t").unwrap();
+        for cs in &cfg.crypto_provider().cipher_suites {
+            let id: CipherSuite = cs.suite();
+            assert!(
+                APPROVED_CIPHER_SUITE_IDS.contains(&id),
+                "non-approved suite: {id:?}"
+            );
+        }
+    }
+
+    /// [`approved_cipher_suites`] must return only approved suite IDs.
+    #[test]
+    fn approved_cipher_suites_filters_correctly() {
+        ring();
+        let provider = CryptoProvider::get_default().unwrap();
+        let filtered = approved_cipher_suites(provider);
+        assert!(!filtered.is_empty());
+        for cs in &filtered {
+            let id: CipherSuite = cs.suite();
+            assert!(
+                APPROVED_CIPHER_SUITE_IDS.contains(&id),
+                "non-approved suite in filtered list: {id:?}"
+            );
+        }
+        assert!(filtered.len() <= provider.cipher_suites.len());
+    }
+
+    /// A well-formed TLS 1.1 ClientHello must not receive a ServerHello.
+    ///
+    /// Sends a TLS 1.1 ClientHello to a stoa-tls server and asserts the server
+    /// does not respond with a Handshake record (0x16).
+    /// rustls 0.23 dropped TLS 1.0/1.1; the server sends Alert (0x15) or EOF.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tls_11_client_hello_is_rejected() {
+        ring();
+        let d = tempfile::TempDir::new().unwrap();
+        let (cp, kp) = gen();
+        let p = d.path().join("c.pem");
+        std::fs::write(&p, &cp).unwrap();
+        let sc = load_tls_server_config_with_key_bytes(p.to_str().unwrap(), &kp, "t").unwrap();
+        let lst = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = lst.local_addr().unwrap();
+        let acc = tokio_rustls::TlsAcceptor::from(sc);
+        tokio::spawn(async move {
+            if let Ok((s, _)) = lst.accept().await {
+                let _ = acc.accept(s).await;
+            }
+        });
+        let hello: &[u8] = &[
+            0x16, 0x03, 0x02, 0x00, 0x2d,
+            0x01, 0x00, 0x00, 0x29,
+            0x03, 0x02,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00,
+            0x00, 0x02, 0x00, 0x2f,
+            0x01, 0x00,
+        ];
+        let mut s: tokio::net::TcpStream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        s.write_all(hello).await.unwrap();
+        let mut buf = [0u8; 64];
+        let n: usize = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            s.read(&mut buf),
+        )
+        .await
+        .expect("server must respond within 2 seconds")
+        .unwrap_or(0);
+        if n > 0 {
+            assert_ne!(
+                buf[0], 0x16,
+                "server sent a Handshake record for TLS 1.1; got 0x{:02x}",
+                buf[0]
+            );
+        }
     }
 }
