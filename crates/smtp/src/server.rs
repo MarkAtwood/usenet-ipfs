@@ -19,6 +19,7 @@ use crate::tls::{accept_tls, TlsAcceptor};
 ///
 /// `listener_smtps` — optional implicit-TLS listener.
 /// `starttls_acceptor` — when `Some`, ports 25/587 advertise and handle STARTTLS.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     listener_25: TcpListener,
     listener_587: TcpListener,
