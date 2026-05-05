@@ -25,6 +25,11 @@ password_hash = "$2b$12$examplehashexamplehashexamplehashexamplehashexamplehashe
 # Required for SMTPS (port 465). Leave empty if using port 587 without TLS.
 # cert_path = "/etc/ssl/certs/mail.crt"
 # key_path  = "/etc/ssl/private/mail.key"
+#
+# TLS policy (PCI-DSS 4.2.1 / SOC2 CC6.7 regulatory defaults):
+#   min_tls_version = "TLS 1.2"  (TLS 1.0 and 1.1 are always rejected)
+#   cipher_suites   = approved AESGCM + CHACHA20 ECDHE suites only
+# These policies are enforced in code and cannot be relaxed via config.
 
 [database]
 # SQLite database for Sieve scripts.

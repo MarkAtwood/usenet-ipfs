@@ -16,7 +16,9 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::ServerConfig;
 use rustls::{DigitallySignedStruct, DistinguishedName, Error, SignatureScheme};
 use sha2::Digest as _;
-use stoa_tls::{load_cert_chain, load_private_key, load_private_key_from_bytes};
+use stoa_tls::{
+    approved_provider_arc, load_cert_chain, load_private_key, load_private_key_from_bytes,
+};
 
 pub use stoa_tls::TlsError;
 
@@ -146,13 +148,13 @@ pub fn load_tls_acceptor_with_key_bytes(
 ) -> Result<TlsAcceptor, TlsError> {
     let cert_chain = load_cert_chain(cert_path)?;
     let private_key = load_private_key_from_bytes(key_pem_bytes, key_label)?;
-    let config = ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_client_cert_verifier(Arc::new(PermissiveClientAuth))
-    .with_single_cert(cert_chain, private_key)
-    .map_err(TlsError::Config)?;
+    let config = ServerConfig::builder_with_provider(approved_provider_arc())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(TlsError::Config)?
+        .with_client_cert_verifier(Arc::new(PermissiveClientAuth))
+        .with_single_cert(cert_chain, private_key)
+        .map_err(TlsError::Config)?;
+    stoa_tls::log_tls_policy(&config);
     Ok(TlsAcceptor {
         inner: tokio_rustls::TlsAcceptor::from(Arc::new(config)),
     })
@@ -169,14 +171,14 @@ pub fn load_tls_acceptor_with_key_bytes(
 pub fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, TlsError> {
     let cert_chain = load_cert_chain(cert_path)?;
     let private_key = load_private_key(key_path)?;
-    let config = ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_client_cert_verifier(Arc::new(PermissiveClientAuth))
-    .with_single_cert(cert_chain, private_key)
-    .map_err(TlsError::Config)?;
+    let config = ServerConfig::builder_with_provider(approved_provider_arc())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(TlsError::Config)?
+        .with_client_cert_verifier(Arc::new(PermissiveClientAuth))
+        .with_single_cert(cert_chain, private_key)
+        .map_err(TlsError::Config)?;
 
+    stoa_tls::log_tls_policy(&config);
     Ok(TlsAcceptor {
         inner: tokio_rustls::TlsAcceptor::from(Arc::new(config)),
     })
