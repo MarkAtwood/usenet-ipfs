@@ -37,6 +37,19 @@ WORKDIR /build
 COPY JMAP/ ./JMAP/
 COPY stoa/  ./stoa/
 
+# Guard: verify the JMAP sibling directory was present in the build context.
+# If the build is run from the wrong directory (e.g. inside stoa/ rather than
+# its parent), COPY JMAP/ silently creates an empty directory and cargo will
+# fail with a confusing path-dependency resolution error.  Fail early with a
+# clear message instead.
+RUN test -d /build/JMAP && \
+    test -n "$(ls /build/JMAP/ 2>/dev/null)" || { \
+        echo "ERROR: /build/JMAP is empty or missing."; \
+        echo "Build the Docker image from the PROJECT root (parent of stoa/):"; \
+        echo "  docker build -f stoa/Dockerfile -t stoa:dev ."; \
+        exit 1; \
+    }
+
 WORKDIR /build/stoa
 
 # Build release binaries with locked deps.

@@ -127,7 +127,29 @@ pub fn compile(script: &[u8]) -> Result<CompiledScript, String> {
     // without one.  RFC 5228 §2.10.5: using a capability without declaring it
     // in `require` is a compile-time error.
     //
-    // Currently enforced: `environment` test (RFC 5183).
+    // Per-extension rationale — why each entry in KNOWN does or does not need
+    // a check_no_test_keyword() call:
+    //
+    //   "fileinto"    — action command, not a test keyword.  The parser would
+    //                   produce an unknown-command error if fileinto appeared
+    //                   without require, so no explicit check is needed.
+    //   "reject"      — action command (same reasoning as fileinto).
+    //   "variables"   — enables variable interpolation in strings; the
+    //                   runtime evaluator silently leaves ${...} intact when
+    //                   variables are not declared, so an undeclared use is
+    //                   effectively a no-op rather than a correctness hazard.
+    //   "regex"       — extends the :matches comparator; the runtime comparator
+    //                   look-up would fail with an error if :regex were used
+    //                   without the require guard at eval time.
+    //   "environment" — introduces the `environment` test keyword (RFC 5183).
+    //                   A script that uses `if environment ...` without
+    //                   `require ["environment"]` would silently pass validation
+    //                   in most Sieve implementations but then fail at runtime
+    //                   when the test is evaluated.  We enforce it at compile
+    //                   time here so the error is surfaced early.
+    //
+    // When adding a new entry to KNOWN that introduces a new test keyword,
+    // add a corresponding check_no_test_keyword() call below.
     if !declared.contains(&"environment".to_string()) {
         check_no_test_keyword(&parsed, "environment")?;
     }

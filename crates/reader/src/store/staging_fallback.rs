@@ -60,6 +60,16 @@ pub async fn fetch_from_staging(pool: &Arc<AnyPool>, msgid: &str) -> StagingResu
         Some((p,)) => p,
     };
 
+    // TOCTOU note: the transit drain task may delete the staging file between
+    // the SELECT above and this read().  The window is narrow (milliseconds to
+    // seconds) but predictable under load.  When that happens, read() returns
+    // ENOENT and we fall through to StagingResult::Error, which the caller
+    // treats identically to NotStaged — both produce a 430 response.  A warn!
+    // is emitted so operators can detect repeated occurrences.  A fully
+    // race-free approach would require the reader to hold an open file
+    // descriptor across the SELECT (e.g. via SQLite ATTACH or a shared fd
+    // cache), but given the fallback's best-effort semantics and short staging
+    // window, the current approach is intentional and acceptable.
     match tokio::fs::read(&file_path).await {
         Ok(bytes) => StagingResult::Found(bytes),
         Err(e) => {
@@ -162,5 +172,48 @@ mod tests {
 
         let result = fetch_from_staging(&pool, "<missing@test>").await;
         assert!(matches!(result, StagingResult::Error));
+    }
+
+    /// Regression test for the TOCTOU race described in staging_fallback.rs:
+    /// the transit drain task may delete the staging file between the SELECT
+    /// and the subsequent tokio::fs::read().  The observable behaviour is
+    /// identical to error_when_file_missing (StagingResult::Error → 430), but
+    /// this test names the scenario explicitly so the invariant is documented
+    /// in the test suite.
+    ///
+    /// We simulate the race by writing a staging row that points to a file that
+    /// is present at INSERT time but deleted before fetch_from_staging() runs.
+    #[tokio::test]
+    async fn error_when_file_deleted_before_read_toctou_race() {
+        let pool = make_staging_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("toctou_art");
+
+        // Write the file so the staging row is consistent at insert time.
+        tokio::fs::write(&file_path, b"From: a@b\r\n\r\nbody\r\n")
+            .await
+            .unwrap();
+        let file_path_str = file_path.to_str().unwrap().to_string();
+
+        sqlx::query(
+            "INSERT INTO transit_staging (id, message_id, file_path, received_at, byte_size) \
+             VALUES ('toctou1', '<toctou@test>', ?, 0, 20)",
+        )
+        .bind(&file_path_str)
+        .execute(&*pool)
+        .await
+        .unwrap();
+
+        // Simulate the transit drain deleting the file before the reader's
+        // tokio::fs::read() call (the TOCTOU window).
+        tokio::fs::remove_file(&file_path).await.unwrap();
+
+        // fetch_from_staging performs SELECT (row found) then read() (ENOENT)
+        // → must return Error, not panic or return NotStaged.
+        let result = fetch_from_staging(&pool, "<toctou@test>").await;
+        assert!(
+            matches!(result, StagingResult::Error),
+            "TOCTOU: file deleted after SELECT must produce StagingResult::Error"
+        );
     }
 }

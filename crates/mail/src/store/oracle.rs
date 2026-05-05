@@ -241,6 +241,15 @@ impl ReceivedActivityStore for OracleMailStore {
     }
 }
 
+// Compile-time check: OracleMailStore must implement every sub-trait that
+// makes up MailStore.  If a new sub-trait is added to MailStore but its impl
+// is omitted here, this line will produce a clear "OracleMailStore does not
+// implement <NewTrait>" error rather than a distant blanket-impl failure.
+const _: fn() = || {
+    fn assert_mail_store<T: super::MailStore + Send + Sync>() {}
+    assert_mail_store::<OracleMailStore>();
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
