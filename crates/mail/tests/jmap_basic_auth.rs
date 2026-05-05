@@ -62,6 +62,7 @@ async fn auth_state_alice() -> Arc<AppState> {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     })
 }
 
@@ -82,6 +83,7 @@ async fn dev_state() -> Arc<AppState> {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     })
 }
 

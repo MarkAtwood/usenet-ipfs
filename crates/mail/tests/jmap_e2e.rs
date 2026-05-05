@@ -210,6 +210,7 @@ async fn jmap_session_e2e() {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

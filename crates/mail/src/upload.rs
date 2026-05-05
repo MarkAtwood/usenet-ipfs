@@ -217,6 +217,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         (state, tmp)
     }

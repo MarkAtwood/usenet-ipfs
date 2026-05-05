@@ -205,6 +205,7 @@ fn base_config() -> Arc<Config> {
         auth: AuthConfig::default(),
         peer_whitelist: vec![],
         mta_sts: Default::default(),
+        shutdown: Default::default(),
     })
 }
 

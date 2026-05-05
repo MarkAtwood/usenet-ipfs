@@ -10,7 +10,6 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use tower_http::set_header::SetResponseHeaderLayer;
 use jmap_server::{
     check_known_capabilities, handle_changes, handle_get, handle_query, request_error, Dispatcher,
     HandlerFuture, JmapHandler,
@@ -27,6 +26,7 @@ use stoa_reader::{
 use stoa_smtp::OutboundMailer;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::{config::CorsConfig, store::MailStore, token_store::TokenStore};
 
@@ -80,6 +80,10 @@ pub struct AppState {
     pub activitypub: Option<Arc<crate::activitypub::ActivityPubState>>,
     /// MTA-STS hosted domain policies (RFC 8461). Empty means no domains served.
     pub mta_sts_domains: Arc<Vec<stoa_smtp::config::MtaStsDomainConfig>>,
+    /// Database pool used by the `/ready` readiness probe.  `None` means no
+    /// DB-backed JMAP stores are configured (e.g. test or minimal mode), and
+    /// `/ready` will return 503.
+    pub db_pool: Option<Arc<sqlx::AnyPool>>,
 }
 
 /// Authenticated user identity extracted from HTTP Basic Auth.
@@ -309,6 +313,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(crate::landing::landing_page))
         .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
         .route("/metrics", get(metrics_handler))
         .route("/.well-known/jmap", get(well_known_jmap))
         .route("/.well-known/mta-sts.txt", get(mta_sts_handler))
@@ -369,6 +374,52 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
         "status": "ok",
         "uptime_secs": uptime_secs
     }))
+}
+
+/// `GET /ready` — readiness probe for load balancer target group health checks.
+///
+/// Returns 200 when the instance is ready to serve traffic, 503 when not.
+/// Unlike `/health` (liveness), this handler performs a lightweight DB check.
+/// Load balancers MUST use `/ready` so that instances still running migrations
+/// or with an unreachable database are not sent live traffic.
+async fn ready_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let uptime_secs = state.start_time.elapsed().as_secs();
+
+    let db_ok = match &state.db_pool {
+        None => false,
+        Some(pool) => {
+            let check = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sqlx::query("SELECT 1").execute(pool.as_ref()),
+            )
+            .await;
+            matches!(check, Ok(Ok(_)))
+        }
+    };
+
+    crate::metrics::STOA_READY
+        .with_label_values(&["db"])
+        .set(if db_ok { 1 } else { 0 });
+
+    if db_ok {
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "db": "ok",
+                "uptime_secs": uptime_secs,
+            })),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "unavailable",
+                "db": "error",
+                "uptime_secs": uptime_secs,
+            })),
+        )
+    }
 }
 
 async fn well_known_jmap() -> impl IntoResponse {
@@ -1233,6 +1284,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         (state, tmp)
     }
@@ -1254,6 +1306,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         (state, tmp)
     }
@@ -1289,6 +1342,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         (state, tmp)
     }
@@ -1376,8 +1430,16 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: Some(Arc::clone(&mail_pool_arc)),
         });
         (state, ipfs, tmps)
+    }
+
+    /// Like `jmap_state()` but returns just the `AppState` (without the ipfs
+    /// and tmps handles) for use in tests that only need a live DB pool.
+    async fn dev_state_with_jmap_stores() -> (Arc<AppState>, Vec<tempfile::TempPath>) {
+        let (state, _ipfs, tmps) = jmap_state().await;
+        (state, tmps)
     }
 
     /// Like `jmap_state()` but with a single test user configured so that
@@ -1413,6 +1475,7 @@ mod tests {
             activitypub_config: state.activitypub_config.clone(),
             activitypub: state.activitypub.clone(),
             mta_sts_domains: state.mta_sts_domains.clone(),
+            db_pool: state.db_pool.clone(),
         });
         (patched, ipfs, tmps)
     }
@@ -1465,6 +1528,60 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["status"], "ok");
         assert!(body["uptime_secs"].is_number());
+    }
+
+    #[tokio::test]
+    async fn ready_returns_503_when_no_db_pool() {
+        // dev_state() leaves db_pool: None — simulates missing DB pool.
+        let addr = spawn_server(dev_state().await.0).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/ready"))
+            .send()
+            .await
+            .expect("request must succeed");
+
+        assert_eq!(resp.status(), 503);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "unavailable");
+        assert_eq!(body["db"], "error");
+        assert!(body["uptime_secs"].is_number());
+    }
+
+    #[tokio::test]
+    async fn ready_returns_200_with_live_db() {
+        // Use a state with a real pool so the SELECT 1 succeeds.
+        let (state, _tmps) = dev_state_with_jmap_stores().await;
+        let addr = spawn_server(state).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/ready"))
+            .send()
+            .await
+            .expect("request must succeed");
+
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["db"], "ok");
+        assert!(body["uptime_secs"].is_number());
+    }
+
+    #[tokio::test]
+    async fn ready_endpoint_is_public() {
+        // /ready must not require authentication.
+        let (state, _tmp) = auth_state("alice", "password123").await;
+        let addr = spawn_server(state).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/ready"))
+            .send()
+            .await
+            .expect("request must succeed");
+
+        // Either 200 or 503 is acceptable (depends on whether db_pool is set),
+        // but must NOT be 401.
+        assert_ne!(resp.status(), 401, "/ready must not require authentication");
     }
 
     #[tokio::test]
@@ -1937,6 +2054,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         let addr = spawn_server(state).await;
         let resp = reqwest::Client::new()
@@ -1982,6 +2100,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         let addr = spawn_server(state).await;
         let resp = reqwest::Client::new()
@@ -2408,6 +2527,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         (state, tmp)
     }
@@ -2471,6 +2591,7 @@ mod tests {
                 },
                 activitypub: None,
                 mta_sts_domains: Arc::new(Vec::new()),
+                db_pool: None,
                 ..inner
             }),
             tmp,
@@ -2658,6 +2779,7 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(domains),
+            db_pool: None,
         });
         (state, tmp)
     }

@@ -1458,6 +1458,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         })
     }
 
@@ -2190,6 +2191,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         });
 
         let client = b"EHLO client.example.com\r\nQUIT\r\n";
@@ -2398,6 +2400,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         });
 
         let queue_dir = tempfile::tempdir().expect("tempdir");

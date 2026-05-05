@@ -463,6 +463,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         })
     }
 
@@ -779,6 +780,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         })
     }
 
@@ -976,6 +978,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         })
     }
 
@@ -1115,6 +1118,7 @@ mod tests {
                 hosted_domains,
                 ..Default::default()
             },
+            shutdown: Default::default(),
         });
         let cache = crate::session::new_sieve_cache();
         let state = AdminState {

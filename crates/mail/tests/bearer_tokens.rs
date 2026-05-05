@@ -66,6 +66,7 @@ fn dev_app_state(token_store: Arc<TokenStore>) -> Arc<AppState> {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     })
 }
 
@@ -96,6 +97,7 @@ fn auth_app_state_alice(token_store: Arc<TokenStore>) -> Arc<AppState> {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     })
 }
 
@@ -133,6 +135,7 @@ fn auth_app_state_two_users(token_store: Arc<TokenStore>) -> Arc<AppState> {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     })
 }
 

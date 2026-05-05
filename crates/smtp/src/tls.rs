@@ -102,6 +102,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         };
         assert!(tls_configured(&cfg));
     }
@@ -133,6 +134,7 @@ mod tests {
             auth: AuthConfig::default(),
             peer_whitelist: vec![],
             mta_sts: Default::default(),
+            shutdown: Default::default(),
         };
         assert!(!tls_configured(&cfg));
     }

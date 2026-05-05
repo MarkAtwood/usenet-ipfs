@@ -248,7 +248,10 @@ mod tests {
 
     fn gen() -> (Vec<u8>, Vec<u8>) {
         let c = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-        (c.cert.pem().into_bytes(), c.key_pair.serialize_pem().into_bytes())
+        (
+            c.cert.pem().into_bytes(),
+            c.key_pair.serialize_pem().into_bytes(),
+        )
     }
 
     fn ring() {
@@ -324,8 +327,7 @@ mod tests {
         let (cp, kp) = gen();
         let p = d.path().join("c.pem");
         std::fs::write(&p, &cp).unwrap();
-        let cfg =
-            load_tls_server_config_with_key_bytes(p.to_str().unwrap(), &kp, "t").unwrap();
+        let cfg = load_tls_server_config_with_key_bytes(p.to_str().unwrap(), &kp, "t").unwrap();
         for cs in &cfg.crypto_provider().cipher_suites {
             let id: CipherSuite = cs.suite();
             assert!(
@@ -365,9 +367,7 @@ mod tests {
         let p = d.path().join("c.pem");
         std::fs::write(&p, &cp).unwrap();
         let sc = load_tls_server_config_with_key_bytes(p.to_str().unwrap(), &kp, "t").unwrap();
-        let lst = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = lst.local_addr().unwrap();
         let acc = tokio_rustls::TlsAcceptor::from(sc);
         tokio::spawn(async move {
@@ -376,28 +376,19 @@ mod tests {
             }
         });
         let hello: &[u8] = &[
-            0x16, 0x03, 0x02, 0x00, 0x2d,
-            0x01, 0x00, 0x00, 0x29,
-            0x03, 0x02,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00,
-            0x00, 0x02, 0x00, 0x2f,
-            0x01, 0x00,
+            0x16, 0x03, 0x02, 0x00, 0x2d, 0x01, 0x00, 0x00, 0x29, 0x03, 0x02, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x02, 0x00, 0x2f, 0x01, 0x00,
         ];
         let mut s: tokio::net::TcpStream = tokio::net::TcpStream::connect(addr).await.unwrap();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         s.write_all(hello).await.unwrap();
         let mut buf = [0u8; 64];
-        let n: usize = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            s.read(&mut buf),
-        )
-        .await
-        .expect("server must respond within 2 seconds")
-        .unwrap_or(0);
+        let n: usize = tokio::time::timeout(std::time::Duration::from_secs(2), s.read(&mut buf))
+            .await
+            .expect("server must respond within 2 seconds")
+            .unwrap_or(0);
         if n > 0 {
             assert_ne!(
                 buf[0], 0x16,

@@ -51,6 +51,7 @@ async fn dev_state(base_url: &str) -> (Arc<AppState>, tempfile::TempPath) {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     });
     (state, tmp)
 }

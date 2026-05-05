@@ -87,6 +87,7 @@ async fn state_no_jmap() -> Arc<AppState> {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     })
 }
 
@@ -146,6 +147,7 @@ async fn state_with_jmap() -> (
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     });
 
     (

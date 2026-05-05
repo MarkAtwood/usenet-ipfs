@@ -2,7 +2,9 @@
 
 use std::sync::LazyLock;
 
-use prometheus::{register_counter_vec, register_histogram_vec, register_int_gauge};
+use prometheus::{
+    register_counter_vec, register_histogram_vec, register_int_gauge, register_int_gauge_vec,
+};
 
 /// Total JMAP method calls, labeled by method name (e.g. "Email/get").
 pub static JMAP_REQUESTS_TOTAL: LazyLock<prometheus::CounterVec> = LazyLock::new(|| {
@@ -35,12 +37,26 @@ pub static EMAIL_QUERY_RESULTS: LazyLock<prometheus::IntGauge> = LazyLock::new(|
     .expect("failed to register email_query_results")
 });
 
+/// Readiness gauge per component: 1 = ready, 0 = not ready.
+///
+/// Labels: `component` in {"db"}.
+/// Updated by the `/ready` handler on every probe.
+pub static STOA_READY: LazyLock<prometheus::IntGaugeVec> = LazyLock::new(|| {
+    register_int_gauge_vec!(
+        "stoa_ready",
+        "Readiness of individual components: 1=ready, 0=not ready",
+        &["component"]
+    )
+    .expect("failed to register stoa_ready")
+});
+
 /// Force-initialise all metric statics and return the Prometheus text payload.
 pub fn gather_metrics() -> Vec<u8> {
     let _ = (
         &*JMAP_REQUESTS_TOTAL,
         &*JMAP_REQUEST_DURATION_SECONDS,
         &*EMAIL_QUERY_RESULTS,
+        &*STOA_READY,
     );
 
     use prometheus::Encoder as _;
@@ -57,9 +73,6 @@ mod tests {
 
     #[test]
     fn metric_names_present() {
-        // Observe a dummy value for each vec metric so their HELP/TYPE lines appear in
-        // gather() output regardless of which other tests have run first.  CounterVec and
-        // HistogramVec only emit output after at least one label-set is observed.
         JMAP_REQUESTS_TOTAL
             .with_label_values(&["_test"])
             .inc_by(0.0);
@@ -100,6 +113,16 @@ mod tests {
         assert!(
             output.contains("jmap_request_duration_seconds"),
             "missing histogram output in:\n{output}"
+        );
+    }
+
+    #[test]
+    fn stoa_ready_gauge_present() {
+        STOA_READY.with_label_values(&["db"]).set(1);
+        let output = String::from_utf8(gather_metrics()).unwrap();
+        assert!(
+            output.contains("stoa_ready"),
+            "missing stoa_ready in:\n{output}"
         );
     }
 }

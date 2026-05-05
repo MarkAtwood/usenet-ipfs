@@ -113,6 +113,7 @@ fn test_config(tim_credential: Option<UserCredential>) -> Arc<Config> {
         auth,
         peer_whitelist: vec![],
         mta_sts: Default::default(),
+        shutdown: Default::default(),
     })
 }
 

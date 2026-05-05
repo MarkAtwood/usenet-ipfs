@@ -158,6 +158,7 @@ async fn spawn_dev_server(tag: &str) -> (String, Vec<tempfile::TempPath>) {
         activitypub_config: Default::default(),
         activitypub: None,
         mta_sts_domains: Arc::new(Vec::new()),
+        db_pool: None,
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
