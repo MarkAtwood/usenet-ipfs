@@ -65,11 +65,17 @@ fn glob_matches(pattern: &str, domain: &str) -> bool {
         return true;
     }
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        // Match "sub.suffix" — domain must end with ".suffix" and have at
-        // least one label before the dot (RFC 1034: * is a single-label wildcard).
+        // RFC 1034 §4.3.3: '*' is a single-label wildcard — it matches
+        // exactly one DNS label.  "mail.example.com" matches "*.example.com"
+        // but "deep.sub.example.com" does not.
+        // Strip ".suffix" from the end; the remainder must be a single label
+        // (non-empty and containing no '.').
         let domain_lower = domain.to_ascii_lowercase();
         let suffix_lower = suffix.to_ascii_lowercase();
-        return domain_lower.ends_with(&format!(".{suffix_lower}"));
+        let prefix = domain_lower
+            .strip_suffix(&format!(".{suffix_lower}"))
+            .unwrap_or("");
+        return !prefix.is_empty() && !prefix.contains('.');
     }
     // Exact match (case-insensitive).
     domain.eq_ignore_ascii_case(pattern)
@@ -513,6 +519,8 @@ mod tests {
         assert!(!glob_matches("*.example.com", "example.com")); // bare domain does not match (RFC 1034)
         assert!(!glob_matches("*.example.com", "evil-example.com"));
         assert!(!glob_matches("*.example.com", "other.org"));
+        // RFC 1034 §4.3.3: '*' matches exactly one label — multi-level subdomains must not match.
+        assert!(!glob_matches("*.example.com", "deep.sub.example.com"));
     }
 
     // Oracle: start_health_poll emits outbound_provider_healthy gauge after one tick.

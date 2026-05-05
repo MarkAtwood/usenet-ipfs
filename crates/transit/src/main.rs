@@ -464,6 +464,11 @@ async fn run_pipeline_and_notify(
 #[tokio::main]
 async fn main() {
     sqlx::any::install_default_drivers();
+    // Install the ring CryptoProvider before any TLS operations so that
+    // stoa_tls::approved_provider() can call CryptoProvider::get_default()
+    // without panicking.  The call is idempotent — if a provider was already
+    // installed (e.g. in tests) the error is silently ignored.
+    stoa_tls::install_ring_provider();
     let start_time = Instant::now();
     let (config_path, check_only, restore_files) = parse_args();
 

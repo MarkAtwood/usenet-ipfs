@@ -332,7 +332,12 @@ pub async fn run_session(
             }
 
             "AUTH" => {
-                if !is_tls {
+                // RFC 4954 §4: reject AUTH on cleartext connections that are
+                // not the submission port.  Submission (is_submission=true)
+                // advertises AUTH PLAIN in EHLO even without TLS, so the
+                // handler must honour it.  Only reject when the connection is
+                // neither TLS nor submission.
+                if !is_tls && !is_submission {
                     if tls_acceptor.is_some() {
                         let _ = write_half
                             .write_all(b"530 5.7.0 Must issue a STARTTLS command first\r\n")
@@ -2421,6 +2426,84 @@ mod tests {
         assert!(
             !response.contains("334"),
             "No AUTH challenge before STARTTLS: {response}"
+        );
+    }
+
+    // Submission port (587, is_submission=true, is_tls=false): EHLO must
+    // advertise AUTH PLAIN and the AUTH handler must honour it.
+    // Oracle: stoa-ik62e — AUTH PLAIN broken on submission port.
+    #[tokio::test]
+    async fn test_auth_plain_succeeds_on_submission_port_without_tls() {
+        use base64::Engine as _;
+        use stoa_auth::UserCredential;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let hash = bcrypt::hash("hunter2", 4).expect("bcrypt");
+        let creds = vec![UserCredential {
+            username: "alice".to_string(),
+            password: hash,
+        }];
+        let cred_store = Arc::new(
+            CredentialStore::from_credentials(&creds)
+                .expect("from_credentials must succeed for valid bcrypt hash"),
+        );
+
+        let config = test_config();
+        let queue_dir = tempfile::tempdir().expect("tempdir");
+        let nntp_queue = NntpQueue::new(queue_dir.path(), None).expect("NntpQueue::new");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let config2 = config.clone();
+        let queue2 = Arc::clone(&nntp_queue);
+        let store2 = Arc::clone(&cred_store);
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.expect("accept");
+            run_session(
+                Box::new(stream),
+                false, // is_tls = false: plaintext submission connection
+                true,  // is_submission = true: port 587
+                peer.to_string(),
+                config2,
+                store2,
+                queue2,
+                None,
+                Arc::new(crate::dns_cache::DnsCache::new()),
+                None,
+                None,
+                None,
+                None,
+                None, // no TLS acceptor
+            )
+            .await;
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+
+        // SASL PLAIN credential: "\0alice\0hunter2"
+        let plain = base64::engine::general_purpose::STANDARD.encode(b"\x00alice\x00hunter2");
+        let script = format!("EHLO client.example.com\r\nAUTH PLAIN {plain}\r\nQUIT\r\n");
+        client.write_all(script.as_bytes()).await.expect("write");
+        client.shutdown().await.expect("shutdown");
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.expect("read");
+
+        // EHLO must advertise AUTH on the submission port.
+        assert!(
+            response.contains("AUTH PLAIN"),
+            "EHLO on submission port must advertise AUTH PLAIN: {response}"
+        );
+        // AUTH PLAIN must succeed (235).
+        assert!(
+            response.contains("235"),
+            "AUTH PLAIN must succeed on submission port (is_submission=true, is_tls=false): {response}"
+        );
+        // Must not see 530 or 534.
+        assert!(
+            !response.contains("530") && !response.contains("534"),
+            "AUTH must not be rejected on submission port: {response}"
         );
     }
 

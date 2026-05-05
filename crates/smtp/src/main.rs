@@ -56,6 +56,12 @@ async fn main() {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
+    // Install the ring CryptoProvider before any TLS operations so that
+    // stoa_tls::approved_provider() can call CryptoProvider::get_default()
+    // without panicking.  The call is idempotent — if a provider was already
+    // installed (e.g. in tests) the error is silently ignored.
+    stoa_tls::install_ring_provider();
+
     stoa_core::emit_startup_banner(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
     let listener_25 = match TcpListener::bind(&config.listen.port_25).await {

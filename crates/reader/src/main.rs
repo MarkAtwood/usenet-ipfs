@@ -262,6 +262,11 @@ fn cmd_keygen(args: &[String]) -> ! {
 #[tokio::main]
 async fn main() {
     sqlx::any::install_default_drivers();
+    // Install the ring CryptoProvider before any TLS operations so that
+    // stoa_tls::approved_provider() can call CryptoProvider::get_default()
+    // without panicking.  The call is idempotent — if a provider was already
+    // installed (e.g. in tests) the error is silently ignored.
+    stoa_tls::install_ring_provider();
     let (config_path, check_only, restore_files) = parse_args();
 
     let config = match Config::load(config_path.as_deref()) {

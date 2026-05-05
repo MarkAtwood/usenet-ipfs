@@ -242,6 +242,16 @@ pub fn approved_provider_arc() -> Arc<CryptoProvider> {
     approved_provider()
 }
 
+/// Install the `ring` [`CryptoProvider`] as the process default.
+///
+/// Must be called early in `main()`, before any TLS operation, so that
+/// [`approved_provider`] can call [`CryptoProvider::get_default`] without
+/// panicking.  The call is idempotent — if a provider was already installed
+/// (e.g. in integration tests) the returned error is silently ignored.
+pub fn install_ring_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
