@@ -147,7 +147,12 @@ fn is_transient_ses_error(
         }
         // Construction errors are permanent (misconfigured SDK).
         SdkError::ConstructionFailure(_) => false,
-        // Unknown variants default to transient (safe to retry).
+        // Unknown variants (e.g. new SDK error kinds added in future AWS SDK
+        // releases) default to transient so they are retried rather than
+        // dead-lettered.  This is the safe conservative choice: a false
+        // "transient" at worst causes extra retries, whereas a false
+        // "permanent" would silently drop mail.  Do not change this to
+        // `false` without auditing the new variant first.
         _ => true,
     }
 }

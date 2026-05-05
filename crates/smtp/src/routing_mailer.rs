@@ -13,12 +13,18 @@ use crate::outbound_mailer::{
 /// healthy wins.  Subsequent entries are tried only if delivery fails.
 #[derive(Debug, Clone)]
 pub enum Selector {
-    /// Match envelopes whose first recipient domain matches this glob pattern.
+    /// Match envelopes whose **first** recipient domain matches this glob pattern.
     ///
     /// Supported patterns:
     /// - `"*"` — matches any domain
     /// - `"*.example.com"` — matches any subdomain of `example.com`
     /// - `"mail.example.com"` — exact domain match
+    ///
+    /// **Warning**: routing is decided solely on `rcpt_to[0]`.  Envelopes with
+    /// recipients on multiple domains (mixed-domain batches) may route some
+    /// recipients through the wrong provider.  Callers must ensure all
+    /// recipients in a single envelope share the same domain, or use
+    /// [`Selector::CatchAll`] / [`Selector::MessageType`] for mixed cases.
     DomainGlob(String),
     /// Match envelopes of the specified message type.
     MessageType(MessageType),
@@ -50,8 +56,9 @@ impl Selector {
 ///
 /// Supported forms:
 /// - `"*"` — matches any string (including empty)
-/// - `"*.example.com"` — matches any label followed by `.example.com`
-///   (e.g. `"mail.example.com"`, `"smtp.example.com"`)
+/// - `"*.example.com"` — matches any subdomain of `example.com` per RFC 1034
+///   semantics: `*` matches exactly one DNS label, so `"mail.example.com"` and
+///   `"smtp.example.com"` match but bare `"example.com"` does not.
 /// - anything else — exact case-insensitive match
 fn glob_matches(pattern: &str, domain: &str) -> bool {
     if pattern == "*" {
@@ -59,10 +66,10 @@ fn glob_matches(pattern: &str, domain: &str) -> bool {
     }
     if let Some(suffix) = pattern.strip_prefix("*.") {
         // Match "sub.suffix" — domain must end with ".suffix" and have at
-        // least one label before the dot.
+        // least one label before the dot (RFC 1034: * is a single-label wildcard).
         let domain_lower = domain.to_ascii_lowercase();
         let suffix_lower = suffix.to_ascii_lowercase();
-        return domain_lower.ends_with(&format!(".{suffix_lower}")) || domain_lower == suffix_lower;
+        return domain_lower.ends_with(&format!(".{suffix_lower}"));
     }
     // Exact match (case-insensitive).
     domain.eq_ignore_ascii_case(pattern)
@@ -503,7 +510,7 @@ mod tests {
         assert!(!glob_matches("example.com", "other.com"));
         assert!(glob_matches("*.example.com", "mail.example.com"));
         assert!(glob_matches("*.example.com", "smtp.example.com"));
-        assert!(glob_matches("*.example.com", "example.com")); // bare domain also matches
+        assert!(!glob_matches("*.example.com", "example.com")); // bare domain does not match (RFC 1034)
         assert!(!glob_matches("*.example.com", "evil-example.com"));
         assert!(!glob_matches("*.example.com", "other.org"));
     }

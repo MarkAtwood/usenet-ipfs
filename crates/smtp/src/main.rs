@@ -84,14 +84,16 @@ async fn main() {
                 let store = match secretx::from_uri(key_path) {
                     Ok(s) => s,
                     Err(e) => {
-                        error!("{e}");
+                        error!("invalid secretx URI for tls.key_path ({key_path}): {e}");
                         std::process::exit(1);
                     }
                 };
                 let secret = match store.get().await {
                     Ok(v) => v,
                     Err(e) => {
-                        error!("{e}");
+                        error!(
+                        "failed to retrieve TLS private key from secretx store ({key_path}): {e}"
+                    );
                         std::process::exit(1);
                     }
                 };

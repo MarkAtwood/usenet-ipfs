@@ -142,8 +142,10 @@ enum SessionState {
 /// allowing both stream types without boxing.
 ///
 /// `is_tls` records whether the session was accepted on the implicit-TLS
-/// SMTPS listener.  AUTH PLAIN is only advertised and accepted when
-/// `is_tls = true` to prevent credentials from being sent in the clear.
+/// SMTPS listener or has completed a STARTTLS upgrade.  AUTH PLAIN is only
+/// advertised and accepted when `is_tls = true` or `is_submission = true`,
+/// preventing credentials from being sent in the clear on port 25 before
+/// STARTTLS negotiation (RFC 4954 §4).
 ///
 /// `credential_store` is the pre-built store used to verify AUTH PLAIN
 /// credentials.  Built once at startup from `config.auth` and shared across
@@ -165,6 +167,7 @@ enum SessionState {
 /// special folder.  Callers populate this once at startup (from the mail DB)
 /// so `sieve_delivery` never issues a per-message `SELECT … WHERE role='inbox'`
 /// query.  `None` means JMAP delivery is not configured.
+///
 /// `is_submission`: `true` when the connection arrived on the submission port
 /// (587).  AUTH PLAIN is advertised on submission sessions even without TLS so
 /// that mail clients can authenticate for demo/dev deployments without TLS.
@@ -285,9 +288,12 @@ pub async fn run_session(
                 } else {
                     ""
                 };
-                let auth_line = if (is_tls || is_submission || tls_acceptor.is_some())
-                    && !credential_store.is_empty()
-                {
+                // RFC 4954 §4: AUTH MUST NOT be advertised on a cleartext
+                // connection that also offers STARTTLS.  Only advertise AUTH
+                // after TLS is active (is_tls) or on the submission port where
+                // plaintext auth is acceptable for dev deployments (is_submission).
+                // tls_acceptor.is_some() alone (pre-upgrade) is not sufficient.
+                let auth_line = if (is_tls || is_submission) && !credential_store.is_empty() {
                     "250-AUTH PLAIN\r\n"
                 } else {
                     ""
@@ -2264,6 +2270,89 @@ mod tests {
         assert!(
             response.contains("STARTTLS"),
             "STARTTLS must appear in EHLO when tls_acceptor is Some: {response}"
+        );
+    }
+
+    // RFC 4954 §4: AUTH MUST NOT be advertised in EHLO on a cleartext connection
+    // that also offers STARTTLS, even when credentials are configured.
+    // Oracle: RFC 4954 §4 "AUTH command is only available after a successful TLS
+    // negotiation" (when STARTTLS is offered).
+    #[tokio::test]
+    async fn test_ehlo_does_not_advertise_auth_before_starttls_with_credentials() {
+        use rcgen::generate_simple_self_signed;
+        use stoa_auth::UserCredential;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Build a credential store with one user (cost 4 = minimum valid bcrypt cost).
+        let hash = bcrypt::hash("secret", 4).expect("bcrypt must not fail at cost 4");
+        let cred_store = Arc::new(
+            CredentialStore::from_credentials(&[UserCredential {
+                username: "user".to_string(),
+                password: hash,
+            }])
+            .expect("from_credentials must succeed for valid bcrypt hash"),
+        );
+
+        let config = test_config();
+        let cert_key = generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("test.crt");
+        let key_path = dir.path().join("test.key");
+        std::fs::write(&cert_path, cert_key.cert.pem().as_bytes()).expect("write cert");
+        std::fs::write(&key_path, cert_key.key_pair.serialize_pem().as_bytes()).expect("write key");
+        let acceptor = Arc::new(
+            crate::tls::build_tls_acceptor(cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+                .expect("build acceptor"),
+        );
+        let queue_dir = tempfile::tempdir().expect("tempdir");
+        let nntp_queue = NntpQueue::new(queue_dir.path(), None).expect("NntpQueue");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let config2 = config.clone();
+        let queue2 = Arc::clone(&nntp_queue);
+        let acceptor2 = Some(Arc::clone(&acceptor));
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.expect("accept");
+            run_session(
+                Box::new(stream),
+                false, // is_tls = false: plaintext connection before STARTTLS
+                false, // is_submission = false: port 25
+                peer.to_string(),
+                config2,
+                cred_store,
+                queue2,
+                None,
+                Arc::new(crate::dns_cache::DnsCache::new()),
+                None,
+                None,
+                None,
+                None,
+                acceptor2, // tls_acceptor present → STARTTLS will be offered
+            )
+            .await;
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        client
+            .write_all(b"EHLO client.example.com\r\nQUIT\r\n")
+            .await
+            .expect("write");
+        client.shutdown().await.expect("shutdown");
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.expect("read");
+
+        // STARTTLS must be offered (connection is plaintext, acceptor is present).
+        assert!(
+            response.contains("STARTTLS"),
+            "STARTTLS must be offered on plaintext connection: {response}"
+        );
+        // AUTH must NOT be advertised: RFC 4954 §4 forbids advertising AUTH
+        // on a connection that has not yet completed TLS, even when STARTTLS is offered.
+        assert!(
+            !response.contains("AUTH"),
+            "AUTH must NOT appear in EHLO before STARTTLS on port 25: {response}"
         );
     }
 
