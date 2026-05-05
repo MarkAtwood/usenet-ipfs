@@ -187,7 +187,65 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+fn env_str(var: &str, field: &mut String) {
+    if let Ok(v) = std::env::var(var) {
+        if !v.is_empty() {
+            *field = v;
+        }
+    }
+}
+
 impl Config {
+    pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
+        let mut config: Config = match path {
+            Some(p) => {
+                let content =
+                    std::fs::read_to_string(p).map_err(|e| ConfigError::Io(e.to_string()))?;
+                toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+            None => toml::from_str(
+                r#"
+[listen]
+addr = ""
+
+[database]
+path = ""
+
+[auth]
+mechanisms = ["PLAIN"]
+
+[tls]
+"#,
+            )
+            .expect("internal default TOML is valid"),
+        };
+        config.apply_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn apply_env(&mut self) {
+        env_str("STOA_IMAP_ADDR", &mut self.listen.addr);
+        if let Ok(v) = std::env::var("STOA_IMAP_TLS_ADDR") {
+            self.listen.tls_addr = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("STOA_TLS_CERT_PATH") {
+            self.tls.cert_path = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("STOA_TLS_KEY_PATH") {
+            self.tls.key_path = if v.is_empty() { None } else { Some(v) };
+        }
+        env_str("STOA_DB_PATH", &mut self.database.path);
+        env_str("STOA_LOG_LEVEL", &mut self.log.level);
+        if let Ok(fmt) = std::env::var("STOA_LOG_FORMAT") {
+            match fmt.to_lowercase().as_str() {
+                "json" => self.log.format = LogFormat::Json,
+                "text" => self.log.format = LogFormat::Text,
+                _ => {}
+            }
+        }
+    }
+
     pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
         let config: Config =

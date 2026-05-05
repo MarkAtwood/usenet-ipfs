@@ -9,12 +9,12 @@ use stoa_imap::{
     listener::{run_plain_listener, run_tls_listener},
 };
 
-fn parse_args() -> PathBuf {
+fn parse_args() -> Option<PathBuf> {
     let mut args = std::env::args().skip(1);
-    for arg in args.by_ref() {
+    while let Some(arg) = args.next() {
         if arg == "--config" {
             match args.next() {
-                Some(path) => return PathBuf::from(path),
+                Some(path) => return Some(PathBuf::from(path)),
                 None => {
                     eprintln!("error: --config requires a path argument");
                     std::process::exit(1);
@@ -22,22 +22,20 @@ fn parse_args() -> PathBuf {
             }
         }
     }
-    eprintln!("error: --config <path> is required");
-    std::process::exit(1);
+    None
 }
 
 #[tokio::main]
 async fn main() {
     let config_path = parse_args();
 
-    let config = match Config::from_file(&config_path) {
+    let config = match Config::load(config_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "error: failed to load config from {}: {}",
-                config_path.display(),
-                e
-            );
+            match &config_path {
+                Some(p) => eprintln!("error: failed to load config from {}: {}", p.display(), e),
+                None => eprintln!("error: failed to load config from environment: {e}"),
+            }
             std::process::exit(1);
         }
     };

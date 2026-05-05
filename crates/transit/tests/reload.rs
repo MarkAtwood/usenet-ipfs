@@ -92,7 +92,7 @@ fn trusted_key_hex(byte: u8) -> String {
 async fn reload_parse_error_leaves_state_unchanged() {
     let bad_file = write_config("this is NOT valid toml ][[[");
     let rs = ReloadableState::new(
-        bad_file.path().to_path_buf(),
+        Some(bad_file.path().to_path_buf()),
         None,
         vec![],
         vec!["comp.test".to_string()],
@@ -135,7 +135,7 @@ async fn reload_groups_names_applied() {
     let f = write_config(&make_toml(&["comp.test"], &[], "info"));
 
     let rs = ReloadableState::new(
-        f.path().to_path_buf(),
+        Some(f.path().to_path_buf()),
         None,
         vec![],
         vec!["comp.test".to_string()],
@@ -180,7 +180,7 @@ async fn reload_trusted_peers_applied() {
     let f = write_config(&make_toml(&[], &[], "info"));
 
     let rs = ReloadableState::new(
-        f.path().to_path_buf(),
+        Some(f.path().to_path_buf()),
         None,
         vec![],
         vec![],
@@ -230,7 +230,7 @@ async fn reload_log_level_detected_not_applied() {
     let f = write_config(&make_toml(&[], &[], "info"));
 
     let rs = ReloadableState::new(
-        f.path().to_path_buf(),
+        Some(f.path().to_path_buf()),
         None,
         vec![],
         vec![],

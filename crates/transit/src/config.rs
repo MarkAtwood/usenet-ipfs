@@ -564,7 +564,68 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+fn env_str(var: &str, field: &mut String) {
+    if let Ok(v) = std::env::var(var) {
+        if !v.is_empty() {
+            *field = v;
+        }
+    }
+}
+
 impl Config {
+    pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
+        let mut config: Config = match path {
+            Some(p) => {
+                let content =
+                    std::fs::read_to_string(p).map_err(|e| ConfigError::Io(e.to_string()))?;
+                toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+            None => toml::from_str(
+                r#"
+[listen]
+addr = ""
+"#,
+            )
+            .expect("internal default TOML is valid"),
+        };
+        config.apply_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn apply_env(&mut self) {
+        env_str("STOA_TRANSIT_ADDR", &mut self.listen.addr);
+        let cert = std::env::var("STOA_TLS_CERT_PATH")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let key = std::env::var("STOA_TLS_KEY_PATH")
+            .ok()
+            .filter(|v| !v.is_empty());
+        if cert.is_some() || key.is_some() {
+            let tls = self.tls.get_or_insert_with(|| TlsConfig {
+                cert_path: String::new(),
+                key_path: String::new(),
+            });
+            if let Some(c) = cert {
+                tls.cert_path = c;
+            }
+            if let Some(k) = key {
+                tls.key_path = k;
+            }
+        }
+        env_str("STOA_DB_URL", &mut self.database.url);
+        env_str("STOA_DB_CORE_URL", &mut self.database.core_url);
+        env_str("STOA_DB_VERIFY_URL", &mut self.database.verify_url);
+        env_str("STOA_LOG_LEVEL", &mut self.log.level);
+        if let Ok(fmt) = std::env::var("STOA_LOG_FORMAT") {
+            match fmt.to_lowercase().as_str() {
+                "json" => self.log.format = LogFormat::Json,
+                "text" => self.log.format = LogFormat::Text,
+                _ => {}
+            }
+        }
+    }
+
     pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
         let config: Config =

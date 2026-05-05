@@ -28,9 +28,11 @@ pub async fn blob_download(
     user: Option<Extension<AuthenticatedUser>>,
     Path((account_id, blob_id, _name)): Path<(String, String, String)>,
 ) -> Response<Body> {
-    // Authentication is always required; reject unauthenticated requests.
+    // Authentication is required in non-dev mode; reject unauthenticated requests.
+    let dev_mode = state.auth_config.is_dev_mode();
     let authenticated_user = match user {
-        Some(Extension(ref u)) => u,
+        Some(Extension(ref u)) => Some(u),
+        None if dev_mode => None, // dev mode: allow anonymous access
         None => {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
@@ -39,13 +41,16 @@ pub async fn blob_download(
                 .unwrap();
         }
     };
-    let expected = format!("u_{}", authenticated_user.0);
-    if account_id != expected {
-        return Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .header(header::CONTENT_TYPE, "text/plain")
-            .body(Body::from("403 Forbidden"))
-            .unwrap();
+    // In non-dev mode, verify the account_id matches the authenticated user.
+    if let Some(au) = authenticated_user {
+        let expected = format!("u_{}", au.0);
+        if account_id != expected {
+            return Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from("403 Forbidden"))
+                .unwrap();
+        }
     }
 
     // Validate that blobId looks like a CID.
@@ -148,14 +153,46 @@ mod tests {
             activitypub_config: Default::default(),
             activitypub: None,
             mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
         });
         (state, tmp)
     }
 
+    /// Build an AppState where auth IS required (non-dev mode).
+    async fn make_auth_required_state() -> (Arc<AppState>, tempfile::TempPath) {
+        let tmp = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        let url = format!("sqlite://{}", tmp.to_str().unwrap());
+        crate::migrations::run_migrations(&url)
+            .await
+            .expect("migrations");
+        let pool = stoa_core::db_pool::try_open_any_pool(&url, 1)
+            .await
+            .expect("pool");
+        let mut auth = AuthConfig::default();
+        auth.required = true;
+        let state = Arc::new(AppState {
+            start_time: Instant::now(),
+            jmap: None,
+            jmap_dispatcher: None,
+            credential_store: Arc::new(CredentialStore::empty()),
+            auth_config: Arc::new(auth),
+            token_store: Arc::new(crate::token_store::TokenStore::new(Arc::new(pool))),
+            oidc_store: None,
+            base_url: "http://localhost".to_string(),
+            cors: crate::config::CorsConfig::default(),
+            slow_jmap_threshold_ms: 0,
+            activitypub_config: Default::default(),
+            activitypub: None,
+            mta_sts_domains: Arc::new(Vec::new()),
+            db_pool: None,
+        });
+        (state, tmp)
+    }
     #[tokio::test]
     async fn unauthenticated_returns_401() {
+        // Auth is required in non-dev mode; unauthenticated access must return 401.
         let resp = blob_download(
-            State(make_dev_state().await.0),
+            State(make_auth_required_state().await.0),
             None,
             Path((
                 "u_alice".to_string(),

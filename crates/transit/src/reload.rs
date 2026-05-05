@@ -25,7 +25,7 @@ use crate::peering::auth::parse_trusted_peer_keys;
 /// The subset of operator config that can be applied without restart.
 pub struct ReloadableState {
     /// Path to the config file (set once at startup; never changes).
-    pub config_path: PathBuf,
+    pub config_path: Option<PathBuf>,
     /// Live group filter.  `None` means "accept all groups".
     pub group_filter: Arc<RwLock<GroupPolicy>>,
     /// Live set of trusted peer public keys for mutual auth.
@@ -53,7 +53,7 @@ pub struct ReloadResult {
 impl ReloadableState {
     /// Create a new `ReloadableState` from the initial config.
     pub fn new(
-        config_path: PathBuf,
+        config_path: Option<PathBuf>,
         group_filter: GroupPolicy,
         trusted_keys: Vec<ed25519_dalek::VerifyingKey>,
         group_names: Vec<String>,
@@ -84,7 +84,7 @@ impl ReloadableState {
         // Serialize concurrent reloads so that read-then-write sequences on
         // prev_* fields are atomic from the perspective of other callers.
         let _reload_guard = self.reload_mutex.lock().await;
-        let new_config = match Config::from_file(&self.config_path) {
+        let new_config = match Config::load(self.config_path.as_deref()) {
             Ok(c) => c,
             Err(e) => {
                 return ReloadResult {

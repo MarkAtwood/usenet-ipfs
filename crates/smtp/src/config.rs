@@ -57,6 +57,37 @@ pub struct Config {
     /// MTA-STS policy configuration (RFC 8461).
     #[serde(default)]
     pub mta_sts: MtaStsConfig,
+    /// Graceful shutdown / SIGTERM drain settings.
+    #[serde(default)]
+    pub shutdown: ShutdownConfig,
+}
+
+fn default_drain_timeout_secs() -> u64 {
+    30
+}
+
+/// Graceful shutdown / SIGTERM drain settings.
+///
+/// When SIGTERM is received, stoa-smtp stops accepting new SMTP connections.
+/// The drain timeout is a hard deadline: if in-flight sessions have not
+/// finished within `drain_timeout_secs`, the process force-exits.
+/// This value must be strictly less than the platform's SIGKILL delay
+/// (AWS ECS: 30 s; Kubernetes: `terminationGracePeriodSeconds` - 5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ShutdownConfig {
+    /// Maximum seconds to wait for in-flight sessions to drain after SIGTERM.
+    /// Default: 30 (matching the AWS ECS default SIGKILL delay).
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_secs: default_drain_timeout_secs(),
+        }
+    }
 }
 
 fn default_db_path() -> String {
@@ -580,7 +611,60 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+fn env_str(var: &str, field: &mut String) {
+    if let Ok(v) = std::env::var(var) {
+        if !v.is_empty() {
+            *field = v;
+        }
+    }
+}
+
 impl Config {
+    pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
+        let mut config: Config = match path {
+            Some(p) => {
+                let content =
+                    std::fs::read_to_string(p).map_err(|e| ConfigError::Io(e.to_string()))?;
+                toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+            None => toml::from_str(
+                r#"
+[listen]
+port_25  = ""
+port_587 = ""
+"#,
+            )
+            .expect("internal default TOML is valid"),
+        };
+        config.apply_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn apply_env(&mut self) {
+        env_str("STOA_SMTP_HOSTNAME", &mut self.hostname);
+        env_str("STOA_SMTP_PORT_25", &mut self.listen.port_25);
+        env_str("STOA_SMTP_PORT_587", &mut self.listen.port_587);
+        if let Ok(v) = std::env::var("STOA_SMTP_SMTPS_ADDR") {
+            self.listen.smtps_addr = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("STOA_TLS_CERT_PATH") {
+            self.tls.cert_path = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("STOA_TLS_KEY_PATH") {
+            self.tls.key_path = if v.is_empty() { None } else { Some(v) };
+        }
+        env_str("STOA_DB_PATH", &mut self.database.path);
+        env_str("STOA_LOG_LEVEL", &mut self.log.level);
+        if let Ok(fmt) = std::env::var("STOA_LOG_FORMAT") {
+            match fmt.to_lowercase().as_str() {
+                "json" => self.log.format = LogFormat::Json,
+                "text" => self.log.format = LogFormat::Text,
+                _ => {}
+            }
+        }
+    }
+
     pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
         let config: Config =

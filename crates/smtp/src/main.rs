@@ -13,12 +13,12 @@ use stoa_smtp::{
     tls::build_tls_acceptor,
 };
 
-fn parse_args() -> PathBuf {
+fn parse_args() -> Option<PathBuf> {
     let mut args = std::env::args().skip(1);
-    for arg in args.by_ref() {
+    while let Some(arg) = args.next() {
         if arg == "--config" {
             match args.next() {
-                Some(path) => return PathBuf::from(path),
+                Some(path) => return Some(PathBuf::from(path)),
                 None => {
                     eprintln!("error: --config requires a path argument");
                     std::process::exit(1);
@@ -26,22 +26,20 @@ fn parse_args() -> PathBuf {
             }
         }
     }
-    eprintln!("error: --config <path> is required");
-    std::process::exit(1);
+    None
 }
 
 #[tokio::main]
 async fn main() {
     let config_path = parse_args();
 
-    let mut config = match Config::from_file(&config_path) {
+    let mut config = match Config::load(config_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "error: failed to load config from {}: {}",
-                config_path.display(),
-                e
-            );
+            match &config_path {
+                Some(p) => eprintln!("error: failed to load config from {}: {}", p.display(), e),
+                None => eprintln!("error: failed to load config from environment: {e}"),
+            }
             std::process::exit(1);
         }
     };
@@ -296,6 +294,12 @@ async fn main() {
         }
     }
 
+    let drain_timeout = std::time::Duration::from_secs(config.shutdown.drain_timeout_secs);
+
+    // When SIGTERM or CTRL-C is received, the select exits and run_server is
+    // dropped — this cancels all in-flight sessions.  The drain-deadline task
+    // ensures the process force-exits within `drain_timeout_secs` even if
+    // something hangs during cleanup (e.g. the Sieve admin server).
     tokio::select! {
         r = run_server(listener_25, listener_587, listener_smtps, tls_acceptor_opt, config, nntp_queue, pool, sieve_cache) => {
             if let Err(e) = r {
@@ -310,6 +314,17 @@ async fn main() {
             info!("received SIGTERM, shutting down");
         }
     }
+
+    // Spawn a drain deadline so cleanup work (Sieve admin server teardown,
+    // final queue flush log entries, etc.) cannot hang indefinitely.
+    tokio::spawn(async move {
+        tokio::time::sleep(drain_timeout).await;
+        info!(
+            drain_timeout_secs = drain_timeout.as_secs(),
+            "drain timeout expired; forcing exit"
+        );
+        std::process::exit(0);
+    });
 
     info!("stoa-smtp stopped");
 }

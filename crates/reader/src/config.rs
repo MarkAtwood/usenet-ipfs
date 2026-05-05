@@ -501,6 +501,55 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
+        let mut config: Config = match path {
+            Some(p) => {
+                let content =
+                    std::fs::read_to_string(p).map_err(|e| ConfigError::Io(e.to_string()))?;
+                toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+            None => toml::from_str(
+                r#"
+[listen]
+addr = ""
+"#,
+            )
+            .expect("internal default TOML is valid"),
+        };
+        config.apply_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn apply_env(&mut self) {
+        fn env_str(var: &str, field: &mut String) {
+            if let Ok(v) = std::env::var(var) {
+                if !v.is_empty() {
+                    *field = v;
+                }
+            }
+        }
+        env_str("STOA_NNTP_ADDR", &mut self.listen.addr);
+        if let Ok(v) = std::env::var("STOA_TLS_CERT_PATH") {
+            self.tls.cert_path = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("STOA_TLS_KEY_PATH") {
+            self.tls.key_path = if v.is_empty() { None } else { Some(v) };
+        }
+        env_str("STOA_DB_URL", &mut self.database.reader_url);
+        env_str("STOA_DB_READER_URL", &mut self.database.reader_url);
+        env_str("STOA_DB_CORE_URL", &mut self.database.core_url);
+        env_str("STOA_DB_VERIFY_URL", &mut self.database.verify_url);
+        env_str("STOA_LOG_LEVEL", &mut self.log.level);
+        if let Ok(fmt) = std::env::var("STOA_LOG_FORMAT") {
+            match fmt.to_lowercase().as_str() {
+                "json" => self.log.format = LogFormat::Json,
+                "text" => self.log.format = LogFormat::Text,
+                _ => {}
+            }
+        }
+    }
+
     /// Returns the effective Kubo API URL: `[backend.kubo.api_url]` when a Kubo
     /// backend is configured, otherwise `[ipfs.api_url]`.  Returns `None` when
     /// a non-Kubo backend is selected (no connectivity check is needed).

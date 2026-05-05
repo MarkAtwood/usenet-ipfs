@@ -43,7 +43,7 @@ use stoa_verify::VerificationStore;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{error, info, warn};
 
-fn parse_args() -> (PathBuf, bool, Vec<PathBuf>) {
+fn parse_args() -> (Option<PathBuf>, bool, Vec<PathBuf>) {
     let args: Vec<String> = std::env::args().collect();
 
     // Subcommand dispatch: `stoa-transit keygen --output <path> [--force]`
@@ -96,13 +96,7 @@ fn parse_args() -> (PathBuf, bool, Vec<PathBuf>) {
             }
         }
     }
-    match config_path {
-        Some(p) => (p, check_only, restore_files),
-        None => {
-            eprintln!("error: --config <path> is required");
-            std::process::exit(1);
-        }
-    }
+    (config_path, check_only, restore_files)
 }
 
 /// Restore SQLite databases from backup files.
@@ -473,14 +467,13 @@ async fn main() {
     let start_time = Instant::now();
     let (config_path, check_only, restore_files) = parse_args();
 
-    let mut config = match Config::from_file(&config_path) {
+    let mut config = match Config::load(config_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "error: failed to load config from {}: {}",
-                config_path.display(),
-                e
-            );
+            match &config_path {
+                Some(p) => eprintln!("error: failed to load config from {}: {}", p.display(), e),
+                None => eprintln!("error: failed to load config from environment: {e}"),
+            }
             std::process::exit(1);
         }
     };

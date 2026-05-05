@@ -64,3 +64,20 @@ watch:
 # Watch for changes and re-run check only (faster feedback)
 watch-check:
     cargo watch -x "check --workspace --all-features"
+
+# Build the OCI container image (must run from stoa/ directory; builds from parent context).
+# Requires Docker 20.10+.
+docker-build tag="stoa:dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PARENT="$(dirname "$(pwd)")"
+    echo "Building from context: $PARENT"
+    docker build -f "$(pwd)/Dockerfile" -t "{{tag}}" "$PARENT"
+
+# Build and tag OCI image with the current git SHA.
+docker-build-sha:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SHA=$(git rev-parse --short HEAD)
+    just docker-build "stoa:sha-${SHA}"
+    echo "Built: stoa:sha-${SHA}"

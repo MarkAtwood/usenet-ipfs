@@ -5,6 +5,14 @@ pub use stoa_smtp::config::{MtaStsConfig, MtaStsDomainConfig, MtaStsMode, SmtpRe
 
 pub use stoa_auth::{AuthConfig, UserCredential};
 
+fn env_str(var: &str, field: &mut String) {
+    if let Ok(v) = std::env::var(var) {
+        if !v.is_empty() {
+            *field = v;
+        }
+    }
+}
+
 // Config fields are read from TOML; server logic will consume them as epics are implemented.
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
@@ -25,6 +33,9 @@ pub struct Config {
     /// MTA-STS policy configuration (RFC 8461).
     #[serde(default)]
     pub mta_sts: MtaStsConfig,
+    /// Graceful shutdown / SIGTERM drain settings.
+    #[serde(default)]
+    pub shutdown: ShutdownConfig,
 }
 
 fn default_base_url() -> String {
@@ -178,6 +189,34 @@ pub struct DeliveryConfig {
     pub smtp_peer_down_secs: u64,
 }
 
+fn default_drain_timeout_secs() -> u64 {
+    30
+}
+
+/// Graceful shutdown / SIGTERM drain settings.
+///
+/// When SIGTERM is received, stoa-mail stops accepting new connections and
+/// waits up to `drain_timeout_secs` for in-flight HTTP requests to complete
+/// before exiting.  This value must be strictly less than the platform's
+/// SIGKILL delay (AWS ECS: 30 s; Kubernetes: set `terminationGracePeriodSeconds`
+/// to `drain_timeout_secs` + 5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ShutdownConfig {
+    /// Maximum seconds to wait for in-flight requests to drain after SIGTERM.
+    /// Default: 30 (matching the AWS ECS default SIGKILL delay).
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_secs: default_drain_timeout_secs(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ConfigError {
     Io(String),
@@ -198,6 +237,62 @@ impl std::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
+        let mut config: Config = match path {
+            Some(p) => {
+                let content =
+                    std::fs::read_to_string(p).map_err(|e| ConfigError::Io(e.to_string()))?;
+                toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+            None => toml::from_str(
+                r#"
+[listen]
+addr = ""
+
+[database]
+
+[auth]
+required = true
+"#,
+            )
+            .expect("internal default TOML is valid"),
+        };
+        config.apply_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn apply_env(&mut self) {
+        env_str("STOA_LISTEN_ADDR", &mut self.listen.addr);
+        env_str("STOA_LISTEN_BASE_URL", &mut self.listen.base_url);
+        if let Ok(v) = std::env::var("STOA_TLS_CERT_PATH") {
+            self.tls.cert_path = if v.is_empty() { None } else { Some(v) };
+        }
+        if let Ok(v) = std::env::var("STOA_TLS_KEY_PATH") {
+            self.tls.key_path = if v.is_empty() { None } else { Some(v) };
+        }
+        env_str("STOA_DB_URL", &mut self.database.url);
+        env_str(
+            "STOA_DB_BLOCK_STORE_PATH",
+            &mut self.database.block_store_path,
+        );
+        env_str("STOA_LOG_LEVEL", &mut self.log.level);
+        if let Ok(fmt) = std::env::var("STOA_LOG_FORMAT") {
+            match fmt.to_lowercase().as_str() {
+                "json" => self.log.format = LogFormat::Json,
+                "text" => self.log.format = LogFormat::Text,
+                _ => {}
+            }
+        }
+        if let Ok(v) = std::env::var("STOA_AUTH_REQUIRED") {
+            match v.to_lowercase().as_str() {
+                "true" | "1" | "yes" => self.auth.required = true,
+                "false" | "0" | "no" => self.auth.required = false,
+                _ => {}
+            }
+        }
+    }
+
     pub fn from_file(path: &Path) -> Result<Config, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
         let config: Config =
@@ -233,8 +328,12 @@ impl Config {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
     use stoa_core::util::is_loopback_addr;
     use tempfile::NamedTempFile;
+
+    // Serialize env-var tests to avoid cross-thread contamination.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_toml(content: &str) -> NamedTempFile {
         let mut f = NamedTempFile::new().expect("tempfile");
@@ -557,6 +656,101 @@ verify_http_signatures = false
         // Guard fires (enabled && !verify) but loopback branch → warn only, no exit
         assert!(cfg.activitypub.enabled && !cfg.activitypub.verify_http_signatures);
         assert!(is_loopback_addr(&cfg.listen.addr));
+    }
+
+    // --- env-var overlay tests ---
+
+    #[test]
+    fn env_vars_override_file_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("STOA_LISTEN_ADDR", "0.0.0.0:9999");
+        std::env::set_var("STOA_DB_URL", "sqlite:///tmp/env-test.db");
+        std::env::set_var("STOA_LOG_LEVEL", "debug");
+        std::env::set_var("STOA_LOG_FORMAT", "json");
+        let toml = r#"
+[listen]
+addr = "127.0.0.1:8080"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::load(Some(f.path())).expect("should parse");
+        assert_eq!(cfg.listen.addr, "0.0.0.0:9999");
+        assert_eq!(cfg.database.url, "sqlite:///tmp/env-test.db");
+        assert_eq!(cfg.log.level, "debug");
+        assert_eq!(cfg.log.format, LogFormat::Json);
+        std::env::remove_var("STOA_LISTEN_ADDR");
+        std::env::remove_var("STOA_DB_URL");
+        std::env::remove_var("STOA_LOG_LEVEL");
+        std::env::remove_var("STOA_LOG_FORMAT");
+    }
+
+    #[test]
+    fn env_only_no_config_file() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("STOA_LISTEN_ADDR", "127.0.0.1:7777");
+        std::env::set_var("STOA_DB_URL", "sqlite:///tmp/nofile-test.db");
+        let cfg = Config::load(None).expect("env-only load should succeed");
+        assert_eq!(cfg.listen.addr, "127.0.0.1:7777");
+        assert_eq!(cfg.database.url, "sqlite:///tmp/nofile-test.db");
+        std::env::remove_var("STOA_LISTEN_ADDR");
+        std::env::remove_var("STOA_DB_URL");
+    }
+
+    #[test]
+    fn env_tls_paths_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("STOA_TLS_CERT_PATH", "/run/secrets/tls.crt");
+        std::env::set_var("STOA_TLS_KEY_PATH", "/run/secrets/tls.key");
+        let toml = r#"
+[listen]
+addr = "127.0.0.1:8080"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::load(Some(f.path())).expect("should parse");
+        assert_eq!(cfg.tls.cert_path.as_deref(), Some("/run/secrets/tls.crt"));
+        assert_eq!(cfg.tls.key_path.as_deref(), Some("/run/secrets/tls.key"));
+        std::env::remove_var("STOA_TLS_CERT_PATH");
+        std::env::remove_var("STOA_TLS_KEY_PATH");
+    }
+
+    #[test]
+    fn env_auth_required_override() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::set_var("STOA_AUTH_REQUIRED", "true");
+        let toml = r#"
+[listen]
+addr = "127.0.0.1:8080"
+
+[database]
+url = "sqlite:///var/lib/stoa/mail/mail.db"
+
+[auth]
+required = false
+
+[tls]
+"#;
+        let f = write_toml(toml);
+        let cfg = Config::load(Some(f.path())).expect("should parse");
+        assert!(
+            cfg.auth.required,
+            "STOA_AUTH_REQUIRED=true must override file"
+        );
+        std::env::remove_var("STOA_AUTH_REQUIRED");
     }
 
     #[test]
