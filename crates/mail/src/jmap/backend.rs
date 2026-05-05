@@ -150,7 +150,7 @@ impl JmapBackend for StoaBackend {
         let scope = O::TYPE_NAME;
         let state = self
             .stores
-            .state_store
+            .mail_store
             .get_state(self.user_id, scope)
             .await
             .unwrap_or_else(|_| "0".to_string());
@@ -172,14 +172,14 @@ impl JmapBackend for StoaBackend {
 
                 let new_state_str = self
                     .stores
-                    .state_store
+                    .mail_store
                     .get_state(self.user_id, "Email")
                     .await
                     .unwrap_or_else(|_| "0".to_string());
 
                 let (created, updated, destroyed) = self
                     .stores
-                    .change_log
+                    .mail_store
                     .query_since(self.user_id, "Email", since_seq)
                     .await
                     .map_err(|e| BackendChangesError::Other(StoaBackendError::Sql(e)))?;
@@ -264,7 +264,7 @@ impl StoaBackend {
     ) -> Result<(Vec<Mailbox>, Vec<Id>), sqlx::Error> {
         let subscribed: HashSet<String> = self
             .stores
-            .subscription_store
+            .mail_store
             .list_subscribed(self.user_id)
             .await
             .unwrap_or_default()
@@ -356,7 +356,7 @@ impl StoaBackend {
         let result_value = crate::email::get::handle_email_get(
             &id_strs,
             self.stores.ipfs.as_ref(),
-            Some(&*self.stores.mail_pool),
+            Some(self.stores.mail_store.as_ref()),
             None,
             "0", // state unused here; get_state is called separately by handle_get
             "",  // account_id unused in the actual object assembly
@@ -486,7 +486,7 @@ impl StoaBackend {
     ) -> Result<QueryResult, StoaBackendError> {
         let subscribed: HashSet<String> = self
             .stores
-            .subscription_store
+            .mail_store
             .list_subscribed(self.user_id)
             .await
             .unwrap_or_default()
@@ -539,7 +539,7 @@ impl StoaBackend {
 
         let state = self
             .stores
-            .state_store
+            .mail_store
             .get_state(self.user_id, "Mailbox")
             .await
             .map_err(StoaBackendError::Sql)?;
@@ -564,7 +564,7 @@ impl StoaBackend {
     ) -> Result<QueryResult, StoaBackendError> {
         let email_state = self
             .stores
-            .state_store
+            .mail_store
             .get_state(self.user_id, "Email")
             .await
             .map_err(StoaBackendError::Sql)?;
@@ -574,39 +574,34 @@ impl StoaBackend {
 
         // Special (SMTP) mailbox path.
         if let Some(mid) = mailbox_id {
-            let is_special: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mailboxes WHERE mailbox_id = ?)")
-                    .bind(mid)
-                    .fetch_one(&*self.stores.mail_pool)
-                    .await
-                    .unwrap_or(false);
+            let is_special = self
+                .stores
+                .mail_store
+                .mailbox_exists(mid)
+                .await
+                .unwrap_or(false);
 
             if is_special {
                 let pos = position.max(0) as u64;
                 let lim = limit.unwrap_or(10_000).min(10_000) as i64;
 
-                let total: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE mailbox_id = ?")
-                        .bind(mid)
-                        .fetch_one(&*self.stores.mail_pool)
-                        .await
-                        .unwrap_or(0);
+                let total = self
+                    .stores
+                    .mail_store
+                    .count_messages_in_mailbox(mid)
+                    .await
+                    .unwrap_or(0);
 
                 let response_pos = pos.min(total as u64);
-                let page: Vec<Id> = sqlx::query_scalar::<_, i64>(
-                    "SELECT id FROM messages \
-                     WHERE mailbox_id = ? \
-                     ORDER BY id DESC LIMIT ? OFFSET ?",
-                )
-                .bind(mid)
-                .bind(lim)
-                .bind(response_pos as i64)
-                .fetch_all(&*self.stores.mail_pool)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|row_id| Id::from(format!("smtp:{row_id}").as_str()))
-                .collect();
+                let page: Vec<Id> = self
+                    .stores
+                    .mail_store
+                    .list_message_ids_in_mailbox(mid, lim, response_pos as i64)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|row_id| Id::from(format!("smtp:{row_id}").as_str()))
+                    .collect();
 
                 return Ok(QueryResult::new(
                     page,

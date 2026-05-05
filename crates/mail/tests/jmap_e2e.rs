@@ -12,7 +12,7 @@ use multihash_codetable::{Code, MultihashDigest};
 use stoa_core::ipld::root_node::{ArticleMetadata, ArticleRootNode};
 use stoa_mail::{
     server::{build_router, AppState, JmapStores},
-    state::{flags::UserFlagsStore, version::StateStore},
+    store::new_sqlx_mail_store,
     token_store::TokenStore,
 };
 use stoa_reader::{
@@ -123,8 +123,6 @@ async fn jmap_session_e2e() {
     let overview_store = Arc::new(OverviewStore::new(reader_pool));
     let mail_pool_arc = Arc::new(mail_pool);
 
-    let state_store = Arc::new(StateStore::new((*mail_pool_arc).clone()));
-    let user_flags = Arc::new(UserFlagsStore::new((*mail_pool_arc).clone()));
     let token_store = Arc::new(TokenStore::new(Arc::clone(&mail_pool_arc)));
 
     // Build sub-block CIDs (placeholder raw blocks — only their identity matters
@@ -177,11 +175,14 @@ async fn jmap_session_e2e() {
         .expect("insert overview must succeed");
 
     // Start mail server with stores.
-    stoa_mail::mailbox::provision::provision_mailboxes(&mail_pool_arc)
+    let mail_store = new_sqlx_mail_store(Arc::clone(&mail_pool_arc));
+    mail_store
+        .provision_mailboxes()
         .await
         .expect("provision_mailboxes must succeed at startup");
     let special_mailboxes = Arc::new(
-        stoa_mail::mailbox::provision::list_mailboxes(&mail_pool_arc)
+        mail_store
+            .list_mailboxes()
             .await
             .expect("list_mailboxes must succeed after provision"),
     );
@@ -190,17 +191,9 @@ async fn jmap_session_e2e() {
         msgid_map: Arc::new(stoa_core::msgid_map::MsgIdMap::new(core_pool)),
         article_numbers: Arc::clone(&article_numbers),
         overview_store: Arc::clone(&overview_store),
-        user_flags: Arc::clone(&user_flags),
-        state_store: Arc::clone(&state_store),
-        change_log: Arc::new(stoa_mail::state::change_log::ChangeLogStore::new(
-            (*mail_pool_arc).clone(),
-        )),
         search_index: None,
-        subscription_store: Arc::new(stoa_mail::state::subscriptions::SubscriptionStore::new(
-            (*mail_pool_arc).clone(),
-        )),
-        smtp_relay_queue: None,
-        mail_pool: Arc::clone(&mail_pool_arc),
+        outbound_mailer: None,
+        mail_store,
         special_mailboxes,
     });
     let state = Arc::new(AppState {

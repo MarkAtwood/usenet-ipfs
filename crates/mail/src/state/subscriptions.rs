@@ -72,6 +72,25 @@ impl SubscriptionStore {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::store::SubscriptionStore for SubscriptionStore {
+    async fn subscribe(&self, user_id: i64, group_name: &str) -> Result<(), sqlx::Error> {
+        self.subscribe(user_id, group_name).await
+    }
+
+    async fn unsubscribe(&self, user_id: i64, group_name: &str) -> Result<(), sqlx::Error> {
+        self.unsubscribe(user_id, group_name).await
+    }
+
+    async fn list_subscribed(&self, user_id: i64) -> Result<Vec<String>, sqlx::Error> {
+        self.list_subscribed(user_id).await
+    }
+
+    async fn is_subscribed(&self, user_id: i64, group_name: &str) -> Result<bool, sqlx::Error> {
+        self.is_subscribed(user_id, group_name).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

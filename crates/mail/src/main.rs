@@ -4,6 +4,7 @@ use stoa_core::util::is_loopback_addr;
 use stoa_mail::{
     config::{Config, LogFormat},
     server::{build_jmap_dispatcher, AppState, JmapStores},
+    store::new_sqlx_mail_store,
     token_store::TokenStore,
 };
 use tracing::{info, warn};
@@ -174,12 +175,15 @@ Either: (1) change listen.addr to 127.0.0.1 for local-only use, or \
         }
     };
 
+    // Build the mail store before mailbox provisioning.
+    let mail_store = new_sqlx_mail_store(Arc::clone(&pool));
+
     // Provision the six RFC 6154 special-use mailboxes (idempotent INSERT OR IGNORE).
-    if let Err(e) = stoa_mail::mailbox::provision::provision_mailboxes(&pool).await {
+    if let Err(e) = mail_store.provision_mailboxes().await {
         eprintln!("error: mailbox provisioning failed: {e}");
         std::process::exit(1);
     }
-    let special_mailboxes = match stoa_mail::mailbox::provision::list_mailboxes(&pool).await {
+    let special_mailboxes = match mail_store.list_mailboxes().await {
         Ok(m) => Arc::new(m),
         Err(e) => {
             eprintln!("error: failed to list mailboxes: {e}");
@@ -187,27 +191,28 @@ Either: (1) change listen.addr to 127.0.0.1 for local-only use, or \
         }
     };
 
-    // Build the outbound SMTP relay queue if relay peers are configured.
-    let smtp_relay_queue = if config.delivery.smtp_relay_peers.is_empty() {
-        None
-    } else {
-        let queue_dir = std::path::PathBuf::from(&config.delivery.smtp_relay_queue_dir);
-        let down_backoff = std::time::Duration::from_secs(config.delivery.smtp_peer_down_secs);
-        match stoa_smtp::SmtpRelayQueue::new(
-            queue_dir,
-            config.delivery.smtp_relay_peers.clone(),
-            down_backoff,
-            None, // no DKIM signer from JMAP server
-            "localhost",
-            None, // no MTA-STS enforcer from JMAP server
-        ) {
-            Ok(q) => Some(q),
-            Err(e) => {
-                eprintln!("error: failed to build SMTP relay queue: {e}");
-                std::process::exit(1);
+    // Build the outbound SMTP relay mailer if relay peers are configured.
+    let outbound_mailer: Option<std::sync::Arc<dyn stoa_smtp::OutboundMailer>> =
+        if config.delivery.smtp_relay_peers.is_empty() {
+            None
+        } else {
+            let queue_dir = std::path::PathBuf::from(&config.delivery.smtp_relay_queue_dir);
+            let down_backoff = std::time::Duration::from_secs(config.delivery.smtp_peer_down_secs);
+            match stoa_smtp::SmtpRelayQueue::new(
+                queue_dir,
+                config.delivery.smtp_relay_peers.clone(),
+                down_backoff,
+                None, // no DKIM signer from JMAP server
+                "localhost",
+                None, // no MTA-STS enforcer from JMAP server
+            ) {
+                Ok(q) => Some(std::sync::Arc::new(stoa_smtp::SmtpRelayMailer::new(q))),
+                Err(e) => {
+                    eprintln!("error: failed to build SMTP relay queue: {e}");
+                    std::process::exit(1);
+                }
             }
-        }
-    };
+        };
 
     let stores = Arc::new(JmapStores {
         ipfs,
@@ -218,19 +223,9 @@ Either: (1) change listen.addr to 127.0.0.1 for local-only use, or \
         overview_store: Arc::new(stoa_reader::store::overview::OverviewStore::new(
             (*pool).clone(),
         )),
-        user_flags: Arc::new(stoa_mail::state::flags::UserFlagsStore::new(
-            (*pool).clone(),
-        )),
-        state_store: Arc::new(stoa_mail::state::version::StateStore::new((*pool).clone())),
-        change_log: Arc::new(stoa_mail::state::change_log::ChangeLogStore::new(
-            (*pool).clone(),
-        )),
-        subscription_store: Arc::new(stoa_mail::state::subscriptions::SubscriptionStore::new(
-            (*pool).clone(),
-        )),
         search_index: None,
-        smtp_relay_queue,
-        mail_pool: Arc::clone(&pool),
+        outbound_mailer,
+        mail_store,
         special_mailboxes,
     });
 
@@ -278,12 +273,12 @@ Set verify_http_signatures = true or change the listen address to 127.0.0.1."
 
     let shutdown = async {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("received CTRL-C, shutting down");
-            }
-            _ = sigterm() => {
-                info!("received SIGTERM, shutting down");
-            }
+        _ = tokio::signal::ctrl_c() => {
+            info!("received CTRL-C, shutting down");
+        }
+        _ = sigterm() => {
+            info!("received SIGTERM, shutting down");
+        }
         }
     };
 

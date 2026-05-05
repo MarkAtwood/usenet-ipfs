@@ -22,6 +22,7 @@ use stoa_core::ipld::root_node::ArticleRootNode;
 use stoa_reader::post::ipfs_write::{IpfsBlockStore, IpfsWriteError};
 
 use super::types::Email;
+use crate::store::SmtpMessageStore;
 
 /// Handle Email/get.
 ///
@@ -30,7 +31,7 @@ use super::types::Email;
 ///     in a single batched query.
 ///   - Otherwise, parse as a CID, fetch from IPFS, and decode DAG-CBOR.
 ///
-/// `pool` is the mail database pool used for smtp: id lookups.
+/// `smtp_store` is the SMTP message store used for smtp: id lookups.
 /// `account_id` is the canonical JMAP accountId string for the response.
 /// `state` is the current JMAP Email state token from StateStore.
 ///
@@ -38,7 +39,7 @@ use super::types::Email;
 pub async fn handle_email_get(
     ids: &[String],
     ipfs: &dyn IpfsBlockStore,
-    pool: Option<&sqlx::AnyPool>,
+    smtp_store: Option<&dyn SmtpMessageStore>,
     properties: Option<&[String]>,
     state: &str,
     account_id: &str,
@@ -55,8 +56,8 @@ pub async fn handle_email_get(
     let smtp_map: HashMap<i64, Email> = if smtp_row_ids.is_empty() {
         HashMap::new()
     } else {
-        match pool {
-            Some(p) => fetch_smtp_emails_batch(&smtp_row_ids, p).await,
+        match smtp_store {
+            Some(s) => fetch_smtp_emails_batch(&smtp_row_ids, s).await,
             None => HashMap::new(),
         }
     };
@@ -93,43 +94,29 @@ pub async fn handle_email_get(
     })
 }
 
-/// Fetch multiple smtp messages in one IN-clause query.
+/// Fetch multiple smtp messages via the SmtpMessageStore trait.
 ///
 /// Row IDs not present in the result are treated as not-found by the caller.
-async fn fetch_smtp_emails_batch(row_ids: &[i64], pool: &sqlx::AnyPool) -> HashMap<i64, Email> {
-    if row_ids.is_empty() {
-        return HashMap::new();
-    }
-    let mut qb: sqlx::QueryBuilder<sqlx::Any> = sqlx::QueryBuilder::new(
-        "SELECT id, raw_message, mailbox_id, received_at \
-         FROM messages WHERE id IN (",
-    );
-    let mut sep = qb.separated(", ");
-    for rid in row_ids {
-        sep.push_bind(*rid);
-    }
-    sep.push_unseparated(")");
-
-    match qb
-        .build_query_as::<(i64, Vec<u8>, String, String)>()
-        .fetch_all(pool)
-        .await
-    {
-        Ok(rows) => rows,
+async fn fetch_smtp_emails_batch(
+    row_ids: &[i64],
+    store: &dyn SmtpMessageStore,
+) -> HashMap<i64, Email> {
+    match store.fetch_smtp_messages_batch(row_ids).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(id, raw, mailbox_id, received_at)| {
+                let smtp_id = format!("smtp:{id}");
+                (
+                    id,
+                    Email::from_smtp_message(&smtp_id, &raw, &mailbox_id, &received_at),
+                )
+            })
+            .collect(),
         Err(e) => {
             tracing::error!("fetch_smtp_emails_batch: DB query failed: {e}");
-            return HashMap::new();
+            HashMap::new()
         }
     }
-    .into_iter()
-    .map(|(id, raw, mailbox_id, received_at)| {
-        let smtp_id = format!("smtp:{id}");
-        (
-            id,
-            Email::from_smtp_message(&smtp_id, &raw, &mailbox_id, &received_at),
-        )
-    })
-    .collect()
 }
 
 async fn fetch_email(id: &str, ipfs: &dyn IpfsBlockStore) -> Result<Option<Email>, String> {

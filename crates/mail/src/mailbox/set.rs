@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use stoa_core::article::GroupName;
 
-use crate::{mailbox::types::mailbox_id_for_group, state::subscriptions::SubscriptionStore};
+use crate::{mailbox::types::mailbox_id_for_group, store::SubscriptionStore};
 use stoa_reader::store::article_numbers::ArticleNumberStore;
 
 /// Returns `true` when `name` is a valid newsgroup name.
@@ -35,7 +35,7 @@ fn is_newsgroup_name(name: &str) -> bool {
 pub async fn handle_mailbox_set(
     args: &Value,
     user_id: i64,
-    subscription_store: &SubscriptionStore,
+    subscription_store: &dyn SubscriptionStore,
     article_numbers: &ArticleNumberStore,
     old_state: &str,
     new_state: &str,
@@ -138,11 +138,12 @@ pub async fn handle_mailbox_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::subscriptions::SubscriptionStore as ConcreteSubscriptionStore;
     use std::sync::Arc;
     use stoa_reader::store::article_numbers::ArticleNumberStore;
 
     async fn make_stores() -> (
-        SubscriptionStore,
+        ConcreteSubscriptionStore,
         Arc<ArticleNumberStore>,
         Vec<tempfile::TempPath>,
     ) {
@@ -175,7 +176,7 @@ mod tests {
         tmps.push(reader_tmp);
 
         (
-            SubscriptionStore::new(mail_pool),
+            ConcreteSubscriptionStore::new(mail_pool),
             Arc::new(ArticleNumberStore::new(reader_pool)),
             tmps,
         )

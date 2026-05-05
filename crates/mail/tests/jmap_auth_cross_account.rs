@@ -19,7 +19,7 @@ use cid::Cid;
 use multihash_codetable::{Code, MultihashDigest};
 use stoa_mail::{
     server::{build_router, AppState, JmapStores},
-    state::{flags::UserFlagsStore, version::StateStore},
+    store::new_sqlx_mail_store,
     token_store::TokenStore,
 };
 use stoa_reader::{
@@ -120,30 +120,25 @@ async fn spawn_dev_server(tag: &str) -> (String, Vec<tempfile::TempPath>) {
     let (core_pool, core_tmp) = make_core_pool(tag).await;
 
     let ipfs = Arc::new(MemIpfs::new());
-    stoa_mail::mailbox::provision::provision_mailboxes(&mail_pool_arc)
+    let mail_store = new_sqlx_mail_store(Arc::clone(&mail_pool_arc));
+    mail_store
+        .provision_mailboxes()
         .await
         .expect("provision_mailboxes must succeed at startup");
     let special_mailboxes = Arc::new(
-        stoa_mail::mailbox::provision::list_mailboxes(&mail_pool_arc)
+        mail_store
+            .list_mailboxes()
             .await
             .expect("list_mailboxes must succeed after provision"),
     );
     let jmap_stores = Arc::new(JmapStores {
         ipfs: ipfs as Arc<dyn IpfsBlockStore>,
         msgid_map: Arc::new(stoa_core::msgid_map::MsgIdMap::new(core_pool)),
-        article_numbers: Arc::new(ArticleNumberStore::new(reader_pool.clone())),
-        overview_store: Arc::new(OverviewStore::new(reader_pool)),
-        user_flags: Arc::new(UserFlagsStore::new((*mail_pool_arc).clone())),
-        state_store: Arc::new(StateStore::new((*mail_pool_arc).clone())),
-        change_log: Arc::new(stoa_mail::state::change_log::ChangeLogStore::new(
-            (*mail_pool_arc).clone(),
-        )),
+        article_numbers: Arc::clone(&article_numbers),
+        overview_store: Arc::clone(&overview_store),
         search_index: None,
-        subscription_store: Arc::new(stoa_mail::state::subscriptions::SubscriptionStore::new(
-            (*mail_pool_arc).clone(),
-        )),
-        smtp_relay_queue: None,
-        mail_pool: Arc::clone(&mail_pool_arc),
+        outbound_mailer: None,
+        mail_store,
         special_mailboxes,
     });
 

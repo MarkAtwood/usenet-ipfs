@@ -6,10 +6,10 @@ use serde_json::{json, Value};
 
 use crate::jmap::types::MethodError;
 use crate::mailbox::types::mailbox_id_for_group;
-use crate::state::flags::UserFlagsStore;
+use crate::store::FlagsStore;
 use stoa_core::msgid_map::MsgIdMap;
 use stoa_reader::post::ipfs_write::{write_article_to_ipfs, IpfsBlockStore};
-use stoa_smtp::SmtpRelayQueue;
+use stoa_smtp::{MessageType, OutboundEnvelope, OutboundMailer};
 
 /// Handle Email/set — route to destroy/update/create sub-handlers.
 ///
@@ -72,7 +72,7 @@ pub fn handle_email_set(args: Value, old_state: &str) -> Result<Value, MethodErr
 pub async fn handle_keyword_update(
     update_map: &serde_json::Map<String, Value>,
     user_id: i64,
-    flags_store: &UserFlagsStore,
+    flags_store: &dyn FlagsStore,
 ) -> (
     serde_json::Map<String, Value>,
     serde_json::Map<String, Value>,
@@ -132,14 +132,14 @@ pub async fn handle_keyword_update(
 /// `Newsgroups:` header.  Creation fails with `invalidArguments` if any
 /// mailbox ID in the request does not correspond to a known group.
 ///
-/// If `smtp_queue` is `Some` and the created article has `to` or `cc`
-/// recipients, the article is enqueued for SMTP relay delivery.  Enqueue
-/// failure is non-fatal and does not fail the JMAP response.
+/// If `outbound_mailer` is `Some` and the created article has `to` or `cc`
+/// recipients, the article is sent via the configured outbound mail provider.
+/// Send failure is non-fatal and does not fail the JMAP response.
 pub async fn handle_email_create(
     create_map: &serde_json::Map<String, Value>,
     ipfs: &dyn IpfsBlockStore,
     msgid_map: &MsgIdMap,
-    smtp_queue: Option<&Arc<SmtpRelayQueue>>,
+    outbound_mailer: Option<&Arc<dyn OutboundMailer>>,
     groups: &[(String, u64, u64)],
 ) -> (
     serde_json::Map<String, Value>,
@@ -155,7 +155,7 @@ pub async fn handle_email_create(
     let mut not_created: serde_json::Map<String, Value> = serde_json::Map::new();
 
     for (creation_id, obj) in create_map {
-        match create_one_email(obj, ipfs, msgid_map, smtp_queue, &id_to_group).await {
+        match create_one_email(obj, ipfs, msgid_map, outbound_mailer, &id_to_group).await {
             Ok(cid) => {
                 created.insert(creation_id.clone(), json!({"id": cid.to_string()}));
             }
@@ -176,7 +176,7 @@ async fn create_one_email(
     obj: &Value,
     ipfs: &dyn IpfsBlockStore,
     msgid_map: &MsgIdMap,
-    smtp_queue: Option<&Arc<SmtpRelayQueue>>,
+    outbound_mailer: Option<&Arc<dyn OutboundMailer>>,
     id_to_group: &HashMap<String, String>,
 ) -> Result<Cid, String> {
     let subject = strip_crlf(
@@ -266,17 +266,19 @@ async fn create_one_email(
         .await
         .map_err(|resp| format!("IPFS write failed: {}", resp.text))?;
 
-    // Enqueue for SMTP relay if a queue is configured and there are recipients.
-    if let Some(queue) = smtp_queue {
+    // Send via outbound mailer if configured and there are recipients.
+    if let Some(mailer) = outbound_mailer {
         let mut rcpt_list = extract_email_addrs(obj.get("to"));
         rcpt_list.extend(extract_email_addrs(obj.get("cc")));
         if !rcpt_list.is_empty() {
-            let rcpts: Vec<&str> = rcpt_list.iter().map(String::as_str).collect();
-            if let Err(e) = queue
-                .enqueue(article.as_bytes(), &from_email, &rcpts, false)
-                .await
-            {
-                tracing::warn!("smtp relay enqueue failed: {e}");
+            let envelope = OutboundEnvelope {
+                mail_from: from_email.clone(),
+                rcpt_to: rcpt_list,
+                message: bytes::Bytes::copy_from_slice(article.as_bytes()),
+                message_type: MessageType::Transactional,
+            };
+            if let Err(e) = mailer.send(envelope).await {
+                tracing::warn!("outbound mailer send failed: {e}");
                 stoa_smtp::metrics::inc_relay_enqueue_failure();
             }
         }
@@ -497,6 +499,29 @@ mod tests {
         (stoa_core::msgid_map::MsgIdMap::new(pool), tmp)
     }
 
+    /// Helper: build a SmtpRelayMailer wrapping a single peer over `dir`.
+    fn make_relay_mailer(dir: &tempfile::TempDir) -> std::sync::Arc<dyn stoa_smtp::OutboundMailer> {
+        use std::time::Duration;
+        use stoa_smtp::config::SmtpRelayPeerConfig;
+        let peer = SmtpRelayPeerConfig {
+            host: "smtp.example.com".to_string(),
+            port: 587,
+            tls: false,
+            username: None,
+            password: None,
+        };
+        let queue = stoa_smtp::SmtpRelayQueue::new(
+            dir.path(),
+            vec![peer],
+            Duration::from_secs(300),
+            None,
+            "test.example.com",
+            None,
+        )
+        .expect("queue");
+        std::sync::Arc::new(stoa_smtp::SmtpRelayMailer::new(queue))
+    }
+
     /// smtp_queue=None: no .env files written even when To: is present.
     #[tokio::test]
     async fn email_create_no_smtp_queue_no_enqueue() {
@@ -540,27 +565,10 @@ mod tests {
     #[tokio::test]
     async fn email_create_with_smtp_queue_and_to_enqueues() {
         use crate::mailbox::types::mailbox_id_for_group;
-        use std::time::Duration;
         use stoa_reader::post::ipfs_write::MemIpfsStore;
-        use stoa_smtp::config::SmtpRelayPeerConfig;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let peer = SmtpRelayPeerConfig {
-            host: "smtp.example.com".to_string(),
-            port: 587,
-            tls: false,
-            username: None,
-            password: None,
-        };
-        let queue = stoa_smtp::SmtpRelayQueue::new(
-            dir.path(),
-            vec![peer],
-            Duration::from_secs(300),
-            None,
-            "test.example.com",
-            None,
-        )
-        .expect("queue");
+        let mailer = make_relay_mailer(&dir);
 
         let (msgid_map, _tmp_msgid) = make_msgid_map().await;
         let ipfs = MemIpfsStore::new();
@@ -580,7 +588,7 @@ mod tests {
         );
 
         let (created, not_created) =
-            handle_email_create(&create_map, &ipfs, &msgid_map, Some(&queue), &groups).await;
+            handle_email_create(&create_map, &ipfs, &msgid_map, Some(&mailer), &groups).await;
         assert!(not_created.is_empty(), "should succeed: {:?}", not_created);
         assert!(created.contains_key("c1"));
 
@@ -597,27 +605,10 @@ mod tests {
     #[tokio::test]
     async fn email_create_with_smtp_queue_no_recipients_no_enqueue() {
         use crate::mailbox::types::mailbox_id_for_group;
-        use std::time::Duration;
         use stoa_reader::post::ipfs_write::MemIpfsStore;
-        use stoa_smtp::config::SmtpRelayPeerConfig;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let peer = SmtpRelayPeerConfig {
-            host: "smtp.example.com".to_string(),
-            port: 587,
-            tls: false,
-            username: None,
-            password: None,
-        };
-        let queue = stoa_smtp::SmtpRelayQueue::new(
-            dir.path(),
-            vec![peer],
-            Duration::from_secs(300),
-            None,
-            "test.example.com",
-            None,
-        )
-        .expect("queue");
+        let mailer = make_relay_mailer(&dir);
 
         let (msgid_map, _tmp_msgid) = make_msgid_map().await;
         let ipfs = MemIpfsStore::new();
@@ -636,7 +627,7 @@ mod tests {
         );
 
         let (created, not_created) =
-            handle_email_create(&create_map, &ipfs, &msgid_map, Some(&queue), &groups).await;
+            handle_email_create(&create_map, &ipfs, &msgid_map, Some(&mailer), &groups).await;
         assert!(not_created.is_empty(), "should succeed: {:?}", not_created);
         assert!(created.contains_key("c1"));
 
@@ -653,29 +644,12 @@ mod tests {
     #[tokio::test]
     async fn email_create_smtp_enqueue_failure_is_nonfatal() {
         use crate::mailbox::types::mailbox_id_for_group;
-        use std::time::Duration;
         use stoa_reader::post::ipfs_write::MemIpfsStore;
-        use stoa_smtp::config::SmtpRelayPeerConfig;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let peer = SmtpRelayPeerConfig {
-            host: "smtp.example.com".to_string(),
-            port: 587,
-            tls: false,
-            username: None,
-            password: None,
-        };
-        let queue = stoa_smtp::SmtpRelayQueue::new(
-            dir.path(),
-            vec![peer],
-            Duration::from_secs(300),
-            None,
-            "test.example.com",
-            None,
-        )
-        .expect("queue");
+        let mailer = make_relay_mailer(&dir);
 
-        // Remove the queue directory so enqueue will fail with an I/O error.
+        // Remove the queue directory so send will fail with an I/O error.
         std::fs::remove_dir_all(dir.path()).expect("remove queue dir");
 
         let (msgid_map, _tmp_msgid) = make_msgid_map().await;
@@ -697,10 +671,10 @@ mod tests {
 
         // Oracle: handle_email_create must succeed (not_created is empty).
         let (created, not_created) =
-            handle_email_create(&create_map, &ipfs, &msgid_map, Some(&queue), &groups).await;
+            handle_email_create(&create_map, &ipfs, &msgid_map, Some(&mailer), &groups).await;
         assert!(
             not_created.is_empty(),
-            "smtp enqueue failure must be non-fatal: {:?}",
+            "outbound mailer send failure must be non-fatal: {:?}",
             not_created
         );
         assert!(created.contains_key("c1"), "article must still be created");

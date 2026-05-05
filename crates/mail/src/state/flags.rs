@@ -120,6 +120,36 @@ impl UserFlagsStore {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::store::FlagsStore for UserFlagsStore {
+    async fn set_flags(
+        &self,
+        user_id: i64,
+        cid: &cid::Cid,
+        seen: bool,
+        flagged: bool,
+    ) -> Result<(), sqlx::Error> {
+        self.set_flags(user_id, cid, seen, flagged).await
+    }
+
+    async fn get_flags(
+        &self,
+        user_id: i64,
+        cid: &cid::Cid,
+    ) -> Result<Option<crate::state::flags::Flags>, sqlx::Error> {
+        self.get_flags(user_id, cid).await
+    }
+
+    async fn list_cids_with_flag(
+        &self,
+        user_id: i64,
+        seen: Option<bool>,
+        flagged: Option<bool>,
+    ) -> Result<Vec<cid::Cid>, sqlx::Error> {
+        self.list_cids_with_flag(user_id, seen, flagged).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

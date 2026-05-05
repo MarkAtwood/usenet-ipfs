@@ -23,18 +23,11 @@ use stoa_reader::{
     search::TantivySearchIndex,
     store::{article_numbers::ArticleNumberStore, overview::OverviewStore},
 };
-use stoa_smtp::SmtpRelayQueue;
+use stoa_smtp::OutboundMailer;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
 
-use crate::{
-    config::CorsConfig,
-    state::{flags::UserFlagsStore, version::StateStore},
-    token_store::TokenStore,
-};
-
-/// v1 is a single-user system; every authenticated session maps to this user.
-const SINGLETON_USER_ID: i64 = 1;
+use crate::{config::CorsConfig, store::MailStore, token_store::TokenStore};
 
 /// JMAP backing stores, wired together for the API handler.
 pub struct JmapStores {
@@ -42,17 +35,13 @@ pub struct JmapStores {
     pub msgid_map: Arc<MsgIdMap>,
     pub article_numbers: Arc<ArticleNumberStore>,
     pub overview_store: Arc<OverviewStore>,
-    pub user_flags: Arc<UserFlagsStore>,
-    pub state_store: Arc<StateStore>,
-    pub change_log: Arc<crate::state::change_log::ChangeLogStore>,
-    pub subscription_store: Arc<crate::state::subscriptions::SubscriptionStore>,
     /// Full-text search index for Email/query `text` filter.
     /// `None` means search is disabled; text filters return empty results.
     pub search_index: Option<Arc<TantivySearchIndex>>,
-    /// Outbound SMTP relay queue. `None` means no relay peers configured.
-    pub smtp_relay_queue: Option<Arc<SmtpRelayQueue>>,
-    /// Mail database pool, used for provisioning and direct SQL queries.
-    pub mail_pool: Arc<sqlx::AnyPool>,
+    /// Outbound mail provider. `None` means no relay peers configured.
+    pub outbound_mailer: Option<Arc<dyn OutboundMailer>>,
+    /// Mail database abstraction — all SQL is behind this trait.
+    pub mail_store: Arc<dyn MailStore + Send + Sync>,
     /// Special-use (RFC 6154) mailboxes cached at startup (lnc3.24).
     /// Populated by `provision_mailboxes` + `list_mailboxes` at startup;
     /// never changes at runtime so no lock is needed.
@@ -546,14 +535,14 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                     // ── RFC 8621 write methods ────────────────────────────────────────────
                     "Mailbox/set" => {
                         let old_state = stores
-                            .state_store
+                            .mail_store
                             .get_state(caller.user_id, "Mailbox")
                             .await
                             .unwrap_or_else(|_| "0".to_string());
                         let mut result = crate::mailbox::set::handle_mailbox_set(
                             &args,
                             caller.user_id,
-                            &stores.subscription_store,
+                            stores.mail_store.as_ref(),
                             &stores.article_numbers,
                             &old_state,
                             &old_state,
@@ -571,7 +560,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                             .unwrap_or(false);
                         if any_created || any_destroyed {
                             let new_state = stores
-                                .state_store
+                                .mail_store
                                 .bump_state(caller.user_id, "Mailbox")
                                 .await
                                 .unwrap_or_else(|_| old_state.clone());
@@ -584,7 +573,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
 
                     "Email/set" => {
                         let old_state = stores
-                            .state_store
+                            .mail_store
                             .get_state(caller.user_id, "Email")
                             .await
                             .unwrap_or_else(|_| "0".to_string());
@@ -603,7 +592,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                                 crate::email::set::handle_keyword_update(
                                     update_map,
                                     caller.user_id,
-                                    &stores.user_flags,
+                                    stores.mail_store.as_ref(),
                                 )
                                 .await;
                             // An id must not appear in both updated and notUpdated.
@@ -638,7 +627,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                                 create_map,
                                 stores.ipfs.as_ref(),
                                 &stores.msgid_map,
-                                stores.smtp_relay_queue.as_ref(),
+                                stores.outbound_mailer.as_ref(),
                                 &known_groups,
                             )
                             .await;
@@ -654,7 +643,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                         // Set real oldState/newState; bump state if any write succeeded.
                         let new_state = if any_changed {
                             stores
-                                .state_store
+                                .mail_store
                                 .bump_state(caller.user_id, "Email")
                                 .await
                                 .unwrap_or_else(|_| old_state.clone())
@@ -675,7 +664,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                                 .collect();
                             if !new_cid_ids.is_empty() {
                                 if let Err(e) = stores
-                                    .change_log
+                                    .mail_store
                                     .record_created(caller.user_id, "Email", &new_cid_ids, new_seq)
                                     .await
                                 {
@@ -687,7 +676,7 @@ impl JmapHandler<JmapCaller> for StoaHandler {
                             let updated_ids: Vec<String> = updated_obj.keys().cloned().collect();
                             if !updated_ids.is_empty() {
                                 if let Err(e) = stores
-                                    .change_log
+                                    .mail_store
                                     .record_updated(caller.user_id, "Email", &updated_ids, new_seq)
                                     .await
                                 {
@@ -985,29 +974,6 @@ impl JmapHandler<JmapCaller> for StoaHandler {
     }
 }
 
-/// Resolve a username to its numeric `user_id` from the database.
-///
-/// - `Ok(Some(id))` — user found in the `users` table.
-/// - `Ok(Some(SINGLETON_USER_ID))` — user not in the table (or `"anonymous"`);
-///   singleton fallback maps every principal to user 1.  This is the intended
-///   behaviour for demo/single-user deployments where a `users` table row is
-///   not required.  Multi-user deployments should provision the table and
-///   remove this fallback.
-/// - `Err` — database error; caller should return 503.
-async fn resolve_user_id(pool: &sqlx::AnyPool, username: &str) -> Result<Option<i64>, sqlx::Error> {
-    match sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE username = ?")
-        .bind(username)
-        .fetch_optional(pool)
-        .await?
-    {
-        Some(id) => Ok(Some(id)),
-        // Demo/single-user fallback: any unknown user (including "anonymous")
-        // maps to SINGLETON_USER_ID so the server is usable without pre-provisioning
-        // user rows.
-        None => Ok(Some(SINGLETON_USER_ID)),
-    }
-}
-
 /// Build the JMAP [`Dispatcher`] that routes all supported methods.
 ///
 /// All RFC 8621 Email/Mailbox/Thread/etc. methods and custom Stoa extensions
@@ -1116,7 +1082,7 @@ async fn jmap_api_handler(
     let canonical_account_id = format!("u_{username}");
     let is_operator = state.auth_config.is_operator(&username);
 
-    let user_id = match resolve_user_id(&jmap.mail_pool, &username).await {
+    let user_id = match jmap.mail_store.resolve_user_id(&username).await {
         Ok(Some(id)) => id,
         Ok(None) => unreachable!("resolve_user_id always returns Some in demo mode"),
         Err(e) => {
@@ -1130,7 +1096,7 @@ async fn jmap_api_handler(
     };
 
     let session_state: jmap_types::State = jmap
-        .state_store
+        .mail_store
         .get_state(user_id, "session")
         .await
         .unwrap_or_else(|_| "0".to_string())
@@ -1181,6 +1147,7 @@ pub async fn run_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::new_sqlx_mail_store;
     use crate::token_store::TokenStore;
     use stoa_auth::{AuthConfig, CredentialStore, UserCredential};
     use stoa_reader::{
@@ -1188,8 +1155,6 @@ mod tests {
         store::{article_numbers::ArticleNumberStore, overview::OverviewStore},
     };
     use tokio::net::TcpListener;
-
-    use crate::state::{flags::UserFlagsStore, version::StateStore};
 
     async fn make_token_store() -> (Arc<TokenStore>, tempfile::TempPath) {
         let tmp = tempfile::NamedTempFile::new().unwrap().into_temp_path();
@@ -1328,11 +1293,14 @@ mod tests {
         let ipfs = Arc::new(MemIpfsStore::new());
         let mail_pool_arc = Arc::new(mail_pool);
 
-        crate::mailbox::provision::provision_mailboxes(&mail_pool_arc)
+        let mail_store = crate::store::new_sqlx_mail_store(Arc::clone(&mail_pool_arc));
+        mail_store
+            .provision_mailboxes()
             .await
             .expect("provision_mailboxes must succeed at startup");
         let special_mailboxes = Arc::new(
-            crate::mailbox::provision::list_mailboxes(&mail_pool_arc)
+            mail_store
+                .list_mailboxes()
                 .await
                 .expect("list_mailboxes must succeed after provision"),
         );
@@ -1341,17 +1309,9 @@ mod tests {
             msgid_map: Arc::new(stoa_core::msgid_map::MsgIdMap::new(core_pool)),
             article_numbers: Arc::new(ArticleNumberStore::new(reader_pool.clone())),
             overview_store: Arc::new(OverviewStore::new(reader_pool)),
-            user_flags: Arc::new(UserFlagsStore::new((*mail_pool_arc).clone())),
-            state_store: Arc::new(StateStore::new((*mail_pool_arc).clone())),
-            change_log: Arc::new(crate::state::change_log::ChangeLogStore::new(
-                (*mail_pool_arc).clone(),
-            )),
-            subscription_store: Arc::new(crate::state::subscriptions::SubscriptionStore::new(
-                (*mail_pool_arc).clone(),
-            )),
             search_index: None,
-            smtp_relay_queue: None,
-            mail_pool: Arc::clone(&mail_pool_arc),
+            outbound_mailer: None,
+            mail_store,
             special_mailboxes,
         });
         let state = Arc::new(AppState {
